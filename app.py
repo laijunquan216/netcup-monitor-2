@@ -72,6 +72,20 @@ def init_db():
     except Exception:
         pass
 
+    # 流量增量与累计计数器基线：旧 traffic_log 数据保留，历史增量列为 NULL
+    for column in ("up_delta", "dl_delta"):
+        try:
+            c.execute(f"ALTER TABLE traffic_log ADD COLUMN {column} INTEGER")
+        except sqlite3.OperationalError:
+            pass
+    c.execute("""CREATE TABLE IF NOT EXISTS traffic_baselines (
+        server_name TEXT PRIMARY KEY,
+        up_total INTEGER NOT NULL,
+        dl_total INTEGER NOT NULL,
+        updated_at REAL NOT NULL
+    )""")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_traffic_delta_server_ts ON traffic_log(server_name, timestamp)")
+
     # 建立高效复合索引加速趋势查询与统计
     c.execute("CREATE INDEX IF NOT EXISTS idx_traffic_server_ts ON traffic_log(server_name, timestamp)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_events_server_ts ON state_events(server_name, start_time)")
@@ -138,105 +152,173 @@ def format_duration(seconds):
     m = int((seconds % 3600) // 60)
     return f"{h}h{m}m"
 
-def log_to_db(name, state, up_total, dl_total, netcup_rx_mib=0.0, netcup_tx_mib=0.0):
+def log_to_db(name, state, up_total=None, dl_total=None, netcup_rx_mib=0.0, netcup_tx_mib=0.0, traffic_valid=False):
     """
-    写入流量日志及状态事件
-    返回: (state_changed: bool, old_state: str)
+    写入有效流量采样及状态事件。
+    首次采样只建立累计计数器基线；计数器回退时该方向增量记为 0 并重建基线。
+    流量采集失败时仍记录限速状态，但绝不写入伪造的 0 流量样本。
     """
+    conn = None
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
         now = time.time()
-        c.execute("INSERT INTO traffic_log (server_name, timestamp, up_total, dl_total, state, netcup_rx_mib, netcup_tx_mib) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (name, now, up_total, dl_total, state, netcup_rx_mib, netcup_tx_mib))
-        
-        c.execute("SELECT id, state, start_time, duration FROM state_events WHERE server_name=? AND end_time IS NULL ORDER BY id DESC LIMIT 1", (name,))
+
+        if traffic_valid:
+            c.execute(
+                "SELECT up_total, dl_total FROM traffic_baselines WHERE server_name=?",
+                (name,)
+            )
+            baseline = c.fetchone()
+            if baseline is None:
+                up_delta = dl_delta = 0
+            else:
+                prev_up, prev_dl = baseline
+                up_delta = up_total - prev_up if up_total >= prev_up else 0
+                dl_delta = dl_total - prev_dl if dl_total >= prev_dl else 0
+                if up_total < prev_up or dl_total < prev_dl:
+                    logger.warning(
+                        f"[{name}] 检测到 qB 累计计数器回退，已重建基线 "
+                        f"(up: {prev_up}->{up_total}, dl: {prev_dl}->{dl_total})"
+                    )
+
+            c.execute(
+                """INSERT INTO traffic_log
+                   (server_name, timestamp, up_total, dl_total, state,
+                    netcup_rx_mib, netcup_tx_mib, up_delta, dl_delta)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (name, now, up_total, dl_total, state, netcup_rx_mib,
+                 netcup_tx_mib, up_delta, dl_delta)
+            )
+            c.execute(
+                """INSERT INTO traffic_baselines (server_name, up_total, dl_total, updated_at)
+                   VALUES (?, ?, ?, ?)
+                   ON CONFLICT(server_name) DO UPDATE SET
+                     up_total=excluded.up_total,
+                     dl_total=excluded.dl_total,
+                     updated_at=excluded.updated_at""",
+                (name, up_total, dl_total, now)
+            )
+
+        c.execute(
+            "SELECT id, state, start_time, duration FROM state_events "
+            "WHERE server_name=? AND end_time IS NULL ORDER BY id DESC LIMIT 1",
+            (name,)
+        )
         last_event = c.fetchone()
-        
         state_changed = False
         old_state = None
-        
+
         if last_event:
             last_id, last_state, start_time, last_dur = last_event
             duration = now - start_time
-            # 异常停机看门狗机制：若距离上次打点超过 30 分钟，说明监控服务曾中断，截断旧事件，防止虚增限速时长
             if (now - (start_time + (last_dur or 0))) > 1800 and last_dur:
-                c.execute("UPDATE state_events SET end_time=?, duration=? WHERE id=?", (start_time + last_dur, last_dur, last_id))
-                c.execute("INSERT INTO state_events (server_name, start_time, state, duration) VALUES (?, ?, ?, 0)", (name, now, state))
+                c.execute(
+                    "UPDATE state_events SET end_time=?, duration=? WHERE id=?",
+                    (start_time + last_dur, last_dur, last_id)
+                )
+                c.execute(
+                    "INSERT INTO state_events (server_name, start_time, state, duration) VALUES (?, ?, ?, 0)",
+                    (name, now, state)
+                )
                 state_changed = (last_state != state)
                 old_state = last_state
             elif last_state != state:
                 logger.info(f"[{name}] 状态变更: {last_state} -> {state}")
-                c.execute("UPDATE state_events SET end_time=?, duration=? WHERE id=?", (now, duration, last_id))
-                c.execute("INSERT INTO state_events (server_name, start_time, state, duration) VALUES (?, ?, ?, 0)", (name, now, state))
+                c.execute(
+                    "UPDATE state_events SET end_time=?, duration=? WHERE id=?",
+                    (now, duration, last_id)
+                )
+                c.execute(
+                    "INSERT INTO state_events (server_name, start_time, state, duration) VALUES (?, ?, ?, 0)",
+                    (name, now, state)
+                )
                 state_changed = True
                 old_state = last_state
             else:
                 c.execute("UPDATE state_events SET duration=? WHERE id=?", (duration, last_id))
         else:
-            c.execute("INSERT INTO state_events (server_name, start_time, state, duration) VALUES (?, ?, ?, 0)", (name, now, state))
-            
+            c.execute(
+                "INSERT INTO state_events (server_name, start_time, state, duration) VALUES (?, ?, ?, 0)",
+                (name, now, state)
+            )
+
         conn.commit()
-        conn.close()
         return state_changed, old_state
     except Exception as e:
+        if conn:
+            conn.rollback()
         logger.error(f"数据库写入错误: {e}")
         return False, None
+    finally:
+        if conn:
+            conn.close()
 
 # ===================== 数据计算逻辑 (防穿透与双轨流量) =====================
 def calculate_traffic(conn, name):
-    """
-    计算流量数据：
-    包含防 qB 重启/重置导致的 Delta 异常穿透保护，并提供 Netcup 官方网卡月度流量
-    """
+    """只汇总本版本记录的有效增量；旧版累计日志不再反推为本月流量。"""
     now = datetime.datetime.now()
-    m_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
-    t_start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     c = conn.cursor()
-    c.execute("SELECT timestamp, up_total, dl_total, netcup_rx_mib, netcup_tx_mib FROM traffic_log WHERE server_name=? AND timestamp >= ? ORDER BY timestamp ASC", (name, m_start))
-    rows = c.fetchall()
-    
-    cur_u, cur_d = 0, 0
-    u_day, d_day, u_mon, d_mon = 0, 0, 0, 0
-    nc_rx_mon, nc_tx_mon = 0.0, 0.0
-    
-    if rows:
-        cur_u, cur_d = rows[-1][1], rows[-1][2]
-        nc_rx_mon = rows[-1][3] or 0.0
-        nc_tx_mon = rows[-1][4] or 0.0
-        
-        c.execute("SELECT MIN(timestamp) FROM traffic_log WHERE server_name=?", (name,))
-        first_ts = c.fetchone()[0] or m_start
-        eff_start = max(m_start, first_ts)
-        delta_days = (now.timestamp() - eff_start) / 86400
-        eff_days = max(1, math.ceil(delta_days))
-        
-        prev_u, prev_d = rows[0][1], rows[0][2]
-        for i in range(1, len(rows)):
-            ts, u, d, _, _ = rows[i]
-            
-            # 防重启/重置穿透保护算法：
-            # 如果计数值下降（u < prev_u），判定为客户端重启
-            # 若 u 处于合理周期范围（如 50GB 以内），则取 u，否则跳过该次异常跳变
-            if u < prev_u:
-                du = u if u < 50 * 1024 * 1024 * 1024 else 0
-            else:
-                du = u - prev_u
 
-            if d < prev_d:
-                dd = d if d < 50 * 1024 * 1024 * 1024 else 0
-            else:
-                dd = d - prev_d
+    c.execute(
+        """SELECT up_total, dl_total FROM traffic_log
+           WHERE server_name=? AND up_delta IS NOT NULL AND dl_delta IS NOT NULL
+           ORDER BY timestamp DESC LIMIT 1""",
+        (name,)
+    )
+    current = c.fetchone()
+    if current:
+        cur_u, cur_d = current
+    else:
+        cur_u, cur_d = 0, 0
 
-            u_mon += du
-            d_mon += dd
-            if ts >= t_start:
-                u_day += du
-                d_day += dd
-            prev_u, prev_d = u, d
-            
-        return u_day, d_day, u_mon, d_mon, cur_u, cur_d, u_mon/eff_days, d_mon/eff_days, nc_rx_mon, nc_tx_mon
-    return 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0.0
+    c.execute(
+        """SELECT
+             COALESCE(SUM(up_delta), 0),
+             COALESCE(SUM(dl_delta), 0)
+           FROM traffic_log
+           WHERE server_name=? AND timestamp>=? AND up_delta IS NOT NULL""",
+        (name, month_start)
+    )
+    u_mon, d_mon = c.fetchone()
+
+    c.execute(
+        """SELECT
+             COALESCE(SUM(up_delta), 0),
+             COALESCE(SUM(dl_delta), 0)
+           FROM traffic_log
+           WHERE server_name=? AND timestamp>=? AND up_delta IS NOT NULL""",
+        (name, day_start)
+    )
+    u_day, d_day = c.fetchone()
+
+    c.execute(
+        """SELECT MIN(timestamp) FROM traffic_log
+           WHERE server_name=? AND timestamp>=? AND up_delta IS NOT NULL""",
+        (name, month_start)
+    )
+    first_ts = c.fetchone()[0]
+    if first_ts:
+        elapsed_days = (now.timestamp() - first_ts) / 86400
+        effective_days = max(1, math.ceil(elapsed_days))
+    else:
+        effective_days = 1
+
+    c.execute(
+        "SELECT netcup_rx_mib, netcup_tx_mib FROM traffic_log "
+        "WHERE server_name=? AND up_delta IS NOT NULL ORDER BY timestamp DESC LIMIT 1",
+        (name,)
+    )
+    netcup = c.fetchone()
+    nc_rx_mon, nc_tx_mon = (netcup[0] or 0.0, netcup[1] or 0.0) if netcup else (0.0, 0.0)
+
+    return (
+        u_day, d_day, u_mon, d_mon, cur_u, cur_d,
+        u_mon / effective_days, d_mon / effective_days,
+        nc_rx_mon, nc_tx_mon
+    )
 
 def calculate_health(conn, name):
     now = time.time()
@@ -271,49 +353,43 @@ def get_daily_trends(conn, server_list):
     dates = []
     trends = {}
     today = datetime.date.today()
-    
     for i in range(6, -1, -1):
-        d = today - datetime.timedelta(days=i)
-        dates.append(d.strftime('%m-%d'))
-        
-    start_7d = (datetime.datetime.now() - datetime.timedelta(days=7)).timestamp()
+        dates.append((today - datetime.timedelta(days=i)).strftime('%m-%d'))
+
     c = conn.cursor()
-    
-    for s in server_list:
-        name = s['name']
+    now = time.time()
+    for server in server_list:
+        name = server['name']
         trends[name] = {'health': [], 'traffic': []}
-        c.execute("SELECT timestamp, up_total, dl_total FROM traffic_log WHERE server_name=? AND timestamp >= ? ORDER BY timestamp ASC", (name, start_7d))
-        logs = c.fetchall()
-        c.execute("SELECT start_time, end_time FROM state_events WHERE server_name=? AND state='low' AND (end_time >= ? OR end_time IS NULL)", (name, start_7d))
+        c.execute(
+            "SELECT start_time, end_time FROM state_events "
+            "WHERE server_name=? AND state='low' AND (end_time>=? OR end_time IS NULL)",
+            (name, (datetime.datetime.now() - datetime.timedelta(days=7)).timestamp())
+        )
         events = c.fetchall()
-        
+
         for i in range(6, -1, -1):
             target_date = today - datetime.timedelta(days=i)
             day_start = datetime.datetime.combine(target_date, datetime.time.min).timestamp()
             day_end = datetime.datetime.combine(target_date, datetime.time.max).timestamp()
-            
-            day_logs = [l for l in logs if day_start <= l[0] <= day_end]
-            if len(day_logs) > 1:
-                daily_sum = 0
-                prev_u, prev_d = day_logs[0][1], day_logs[0][2]
-                for j in range(1, len(day_logs)):
-                    ts, u, d = day_logs[j]
-                    du = u if (u < prev_u and u < 50 * 1024 * 1024 * 1024) else max(0, u - prev_u)
-                    dd = d if (d < prev_d and d < 50 * 1024 * 1024 * 1024) else max(0, d - prev_d)
-                    daily_sum += (du + dd)
-                    prev_u, prev_d = u, d
-                trends[name]['traffic'].append(round(daily_sum / 1024 / 1024 / 1024, 2))
-            else:
-                trends[name]['traffic'].append(0)
-            
+
+            c.execute(
+                """SELECT COALESCE(SUM(COALESCE(up_delta, 0) + COALESCE(dl_delta, 0)), 0)
+                   FROM traffic_log
+                   WHERE server_name=? AND timestamp>=? AND timestamp<=?
+                     AND up_delta IS NOT NULL""",
+                (name, day_start, day_end)
+            )
+            daily_bytes = c.fetchone()[0] or 0
+            trends[name]['traffic'].append(round(daily_bytes / 1024 / 1024 / 1024, 2))
+
             day_throttled = 0
-            now = time.time()
             for start, end in events:
-                e_end = end if end else now
+                event_end = end if end else now
                 overlap_start = max(start, day_start)
-                overlap_end = min(e_end, day_end)
+                overlap_end = min(event_end, day_end)
                 if overlap_end > overlap_start:
-                    day_throttled += (overlap_end - overlap_start)
+                    day_throttled += overlap_end - overlap_start
             trends[name]['health'].append(round(day_throttled / 3600, 1))
 
     return dates, trends
@@ -782,13 +858,31 @@ def run_monitor_task():
     def process_single_server(s):
         name, ip = s['name'], s['ip']
         is_unmanaged = s.get('unmanaged', False)
-        up, dl = 0, 0
-        
-        r = qb_req(ip, "/transfer/info")
-        if r and r.status_code == 200:
-            d = r.json()
-            up, dl = d.get('up_info_data', 0), d.get('dl_info_data', 0)
-            
+        up, dl = None, None
+        traffic_valid = False
+
+        # 沿用旧版实测稳定的 qB maindata 累计计数器接口。
+        # 采集失败只跳过流量样本，不影响后续主控限速状态与流控处理。
+        r = qb_req(ip, "/sync/maindata?rid=0")
+        if not r or r.status_code != 200:
+            logger.warning(f"[{name}] QB maindata 请求失败，跳过本轮流量采样")
+        else:
+            try:
+                payload = r.json()
+                server_state = payload.get("server_state") or {}
+                raw_up = server_state.get("alltime_ul")
+                raw_dl = server_state.get("alltime_dl")
+                if raw_up is None or raw_dl is None:
+                    raise ValueError("server_state 缺少 alltime_ul/alltime_dl")
+                if isinstance(raw_up, bool) or isinstance(raw_dl, bool):
+                    raise ValueError("累计流量字段类型无效")
+                up, dl = int(raw_up), int(raw_dl)
+                if up < 0 or dl < 0:
+                    raise ValueError("累计流量不能为负数")
+                traffic_valid = True
+            except (ValueError, TypeError, AttributeError) as exc:
+                logger.warning(f"[{name}] QB maindata 数据无效，跳过流量采样: {exc}")
+
         master_id = str(s.get('master_server_id') or '')
         master_item = master_by_id.get(master_id) if master_id else master_by_ip.get(ip)
         if not master_item or 'throttled' not in master_item or not master_item.get('status_available'):
@@ -796,10 +890,13 @@ def run_monitor_task():
             return
         is_throttled = bool(master_item.get('throttled'))
         state = 'low' if is_throttled else 'high'
-        
+
         nc_rx, nc_tx = 0.0, 0.0
-        
-        state_changed, old_state = log_to_db(name, state, up, dl, nc_rx, nc_tx)
+        state_changed, old_state = log_to_db(
+            name, state, up, dl, nc_rx, nc_tx, traffic_valid=traffic_valid
+        )
+        if not traffic_valid:
+            logger.info(f"[{name}] 本轮仅更新限速状态，未写入流量采样")
         
         action_summary = []
         
