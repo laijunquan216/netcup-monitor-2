@@ -648,6 +648,7 @@
             const data = await r.json();
             if (!r.ok || data.status !== 'success') throw new Error(data.message || '连接失败');
             masterInstances = data.instances || [];
+            config.master_api_url = payload.master_api_url; config.master_api_key = payload.master_api_key;
             resultBox.innerText = data.message + '\\n' + masterInstances.map(x => x.id + ' | ' + x.name + ' | ' + x.ip + ' | ' + (x.throttled ? '限速' : '正常')).join('\\n');
             showToast('主控机连接成功', 'success');
             renderForms();
