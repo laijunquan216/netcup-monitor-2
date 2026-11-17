@@ -84,6 +84,13 @@ def init_db():
         dl_total INTEGER NOT NULL,
         updated_at REAL NOT NULL
     )""")
+    # 暂存疑似异常累计值：需下一轮采样确认后才允许重建基线。
+    c.execute("""CREATE TABLE IF NOT EXISTS traffic_pending (
+        server_name TEXT PRIMARY KEY,
+        up_total INTEGER NOT NULL,
+        dl_total INTEGER NOT NULL,
+        observed_at REAL NOT NULL
+    )""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_traffic_delta_server_ts ON traffic_log(server_name, timestamp)")
 
     # 建立高效复合索引加速趋势查询与统计
@@ -165,22 +172,92 @@ def log_to_db(name, state, up_total=None, dl_total=None, netcup_rx_mib=0.0, netc
         now = time.time()
 
         if traffic_valid:
+            # 100 GiB/5min 是异常保护上限，不是流量限额；按实际采样间隔线性放宽。
+            # 当前已观测到约 11 GiB/5min，正常采样远低于此阈值。
+            max_bytes_per_5m = 100 * 1024 ** 3
             c.execute(
-                "SELECT up_total, dl_total FROM traffic_baselines WHERE server_name=?",
+                "SELECT up_total, dl_total, updated_at FROM traffic_baselines WHERE server_name=?",
                 (name,)
             )
             baseline = c.fetchone()
+            c.execute(
+                "SELECT up_total, dl_total, observed_at FROM traffic_pending WHERE server_name=?",
+                (name,)
+            )
+            pending = c.fetchone()
+
+            accepted = True
             if baseline is None:
                 up_delta = dl_delta = 0
             else:
-                prev_up, prev_dl = baseline
-                up_delta = up_total - prev_up if up_total >= prev_up else 0
-                dl_delta = dl_total - prev_dl if dl_total >= prev_dl else 0
-                if up_total < prev_up or dl_total < prev_dl:
-                    logger.warning(
-                        f"[{name}] 检测到 qB 累计计数器回退，已重建基线 "
-                        f"(up: {prev_up}->{up_total}, dl: {prev_dl}->{dl_total})"
-                    )
+                prev_up, prev_dl, baseline_at = baseline
+                elapsed = max(60.0, now - baseline_at)
+                allowed = max_bytes_per_5m * max(1.0, elapsed / 300.0)
+
+                if pending is not None:
+                    candidate_up, candidate_dl, candidate_at = pending
+                    candidate_elapsed = max(60.0, now - candidate_at)
+                    candidate_allowed = max_bytes_per_5m * max(1.0, candidate_elapsed / 300.0)
+                    candidate_up_delta = up_total - candidate_up
+                    candidate_dl_delta = dl_total - candidate_dl
+
+                    # 第二个连续样本与暂存值相符：确认计数器已跳到新量级，
+                    # 只统计确认样本之后的增量，不追认异常跳变本身。
+                    if (candidate_up_delta >= 0 and candidate_dl_delta >= 0
+                            and candidate_up_delta <= candidate_allowed
+                            and candidate_dl_delta <= candidate_allowed):
+                        up_delta = candidate_up_delta
+                        dl_delta = candidate_dl_delta
+                        logger.warning(
+                            f"[{name}] 异常累计值经连续采样确认，已从新值重建基线；"
+                            "跳变区间不计入流量"
+                        )
+                    else:
+                        # 若旧基线到当前样本已恢复为合理增量，视为前一笔误报；
+                        # 否则滚动暂存最新候选值，等待下一轮确认。
+                        old_up_delta = up_total - prev_up
+                        old_dl_delta = dl_total - prev_dl
+                        if (old_up_delta >= 0 and old_dl_delta >= 0
+                                and old_up_delta <= allowed and old_dl_delta <= allowed):
+                            up_delta, dl_delta = old_up_delta, old_dl_delta
+                        else:
+                            accepted = False
+                            up_delta = dl_delta = None
+                            c.execute(
+                                "UPDATE traffic_pending SET up_total=?, dl_total=?, observed_at=? WHERE server_name=?",
+                                (up_total, dl_total, now, name)
+                            )
+                            logger.warning(
+                                f"[{name}] qB 累计值仍异常，暂不计入本轮且不更新基线，等待下一次确认"
+                            )
+                else:
+                    raw_up_delta = up_total - prev_up
+                    raw_dl_delta = dl_total - prev_dl
+
+                    # 计数器回退按重置处理；该方向不产生负流量。
+                    if raw_up_delta < 0 or raw_dl_delta < 0:
+                        up_delta = max(0, raw_up_delta)
+                        dl_delta = max(0, raw_dl_delta)
+                        logger.warning(f"[{name}] 检测到 qB 累计计数器回退，已重建基线")
+                    elif raw_up_delta > allowed or raw_dl_delta > allowed:
+                        accepted = False
+                        up_delta = dl_delta = None
+                        c.execute(
+                            """INSERT INTO traffic_pending (server_name, up_total, dl_total, observed_at)
+                               VALUES (?, ?, ?, ?)
+                               ON CONFLICT(server_name) DO UPDATE SET
+                                 up_total=excluded.up_total,
+                                 dl_total=excluded.dl_total,
+                                 observed_at=excluded.observed_at""",
+                            (name, up_total, dl_total, now)
+                        )
+                        logger.warning(
+                            f"[{name}] qB 累计值疑似异常跳升 "
+                            f"(up_delta={raw_up_delta}, dl_delta={raw_dl_delta})；"
+                            "本轮暂不计入且保留原基线，等待下一次确认"
+                        )
+                    else:
+                        up_delta, dl_delta = raw_up_delta, raw_dl_delta
 
             c.execute(
                 """INSERT INTO traffic_log
@@ -190,15 +267,18 @@ def log_to_db(name, state, up_total=None, dl_total=None, netcup_rx_mib=0.0, netc
                 (name, now, up_total, dl_total, state, netcup_rx_mib,
                  netcup_tx_mib, up_delta, dl_delta)
             )
-            c.execute(
-                """INSERT INTO traffic_baselines (server_name, up_total, dl_total, updated_at)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(server_name) DO UPDATE SET
-                     up_total=excluded.up_total,
-                     dl_total=excluded.dl_total,
-                     updated_at=excluded.updated_at""",
-                (name, up_total, dl_total, now)
-            )
+
+            if accepted:
+                c.execute(
+                    """INSERT INTO traffic_baselines (server_name, up_total, dl_total, updated_at)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(server_name) DO UPDATE SET
+                         up_total=excluded.up_total,
+                         dl_total=excluded.dl_total,
+                         updated_at=excluded.updated_at""",
+                    (name, up_total, dl_total, now)
+                )
+                c.execute("DELETE FROM traffic_pending WHERE server_name=?", (name,))
 
         c.execute(
             "SELECT id, state, start_time, duration FROM state_events "
