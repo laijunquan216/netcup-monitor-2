@@ -13,4 +13,4 @@ jobs:
         with:
           python-version: "3.x"
       - name: Syntax check (py_compile)
-        run: python -m py_compile app.py
+        run: python -m py_compile app.py backfill_traffic_history.py
