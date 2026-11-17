@@ -791,7 +791,7 @@ def run_monitor_task():
             
         master_id = str(s.get('master_server_id') or '')
         master_item = master_by_id.get(master_id) if master_id else master_by_ip.get(ip)
-        if not master_item or 'throttled' not in master_item:
+        if not master_item or 'throttled' not in master_item or not master_item.get('status_available'):
             logger.error(f"[{name}] 未绑定主控机实例或未获取到限速状态，跳过本轮控制")
             return
         is_throttled = bool(master_item.get('throttled'))
