@@ -569,7 +569,7 @@
         else if (mode === 'wechat_app') { wx_app.classList.remove('d-none'); }
     }
 
-    function fetchConfig() { if(!isLoggedIn)return; fetch('/api/config').then(r=>r.json()).then(d => { config = d; renderForms(); }); }
+    function fetchConfig() { if(!isLoggedIn)return; fetch('/api/config').then(r=>r.json()).then(d => { config = d; renderForms(); if(config.master_api_url && config.master_api_key) testMasterConnection(); }); }
     function renderForms() {
         document.getElementById('qb_user').value = config.qb_config?.user||''; document.getElementById('qb_pass').value = config.qb_config?.password||''; document.getElementById('qb_port').value = config.qb_config?.port||''; 
         document.getElementById('vt_url').value = config.vertex_config?.api_url||''; document.getElementById('vt_user').value = config.vertex_config?.api_user||''; document.getElementById('vt_pass').value = config.vertex_config?.api_password||''; document.getElementById('vt_container').value = config.vertex_config?.container_name||'vertex';
@@ -604,7 +604,7 @@
     }
     function updateArr(t,i,k,v){ if(t==='servers') config.servers[i][k]=v; }
     function removeArr(t,i){ if(t==='servers') config.servers.splice(i,1); renderForms(); }
-    function addServerRow(){if(!config.servers)config.servers=[];config.servers.push({name:'New',ip:'',client_id:'',unmanaged:false});renderForms();}
+    function addServerRow(){if(!config.servers)config.servers=[];config.servers.push({name:'New',ip:'',client_id:'',master_server_id:'',unmanaged:false});renderForms();}
 
     
     function saveConfig() {
