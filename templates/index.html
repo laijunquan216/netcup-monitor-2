@@ -614,6 +614,7 @@
 
         config.master_api_url=document.getElementById('master_api_url').value.trim();
         config.master_api_key=document.getElementById('master_api_key').value.trim();
+        delete config.scp_config; delete config.soap_config;
         config.qb_config={user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value) || 8080};
         config.vertex_config={api_url:document.getElementById('vt_url').value,api_user:document.getElementById('vt_user').value,api_password:document.getElementById('vt_pass').value,container_name:document.getElementById('vt_container').value};
         delete config.rss_dir; 
