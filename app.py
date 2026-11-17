@@ -236,9 +236,24 @@ def log_to_db(name, state, up_total=None, dl_total=None, netcup_rx_mib=0.0, netc
 
                     # 计数器回退按重置处理；该方向不产生负流量。
                     if raw_up_delta < 0 or raw_dl_delta < 0:
-                        up_delta = max(0, raw_up_delta)
-                        dl_delta = max(0, raw_dl_delta)
-                        logger.warning(f"[{name}] 检测到 qB 累计计数器回退，已重建基线")
+                        # 回退方向按重置处理；另一方向仍必须通过暴涨阈值检查。
+                        if max(0, raw_up_delta) > allowed or max(0, raw_dl_delta) > allowed:
+                            accepted = False
+                            up_delta = dl_delta = None
+                            c.execute(
+                                """INSERT INTO traffic_pending (server_name, up_total, dl_total, observed_at)
+                                   VALUES (?, ?, ?, ?)
+                                   ON CONFLICT(server_name) DO UPDATE SET
+                                     up_total=excluded.up_total,
+                                     dl_total=excluded.dl_total,
+                                     observed_at=excluded.observed_at""",
+                                (name, up_total, dl_total, now)
+                            )
+                            logger.warning(f"[{name}] 计数器回退同时伴随异常跳升，本轮隔离并等待确认")
+                        else:
+                            up_delta = max(0, raw_up_delta)
+                            dl_delta = max(0, raw_dl_delta)
+                            logger.warning(f"[{name}] 检测到 qB 累计计数器回退，已重建基线")
                     elif raw_up_delta > allowed or raw_dl_delta > allowed:
                         accepted = False
                         up_delta = dl_delta = None
