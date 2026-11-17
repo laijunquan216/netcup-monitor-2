@@ -277,10 +277,16 @@
                             </div>
                         </div>
                         <div class="mb-3 row align-items-center">
-                            <label class="col-sm-3 col-form-label">监控 RSS ID</label>
+                            <label class="col-sm-3 col-form-label">监控 RSS 任务</label>
                             <div class="col-sm-9">
-                                <input id="rss_ids" class="form-control" placeholder="4c145005, c0bf7481 (逗号分隔)">
-                                <div class="form-hint">自动根据限速状态更新分配的下载器</div>
+                                <div class="d-flex gap-2 align-items-center mb-2">
+                                    <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadVertexRssRules()">读取 Vertex RSS 任务</button>
+                                    <span id="rssRuleStatus" class="form-hint">连接 Vertex 后自动读取任务别名，勾选需要联动的任务</span>
+                                </div>
+                                <div id="rssRuleList" class="border rounded p-2" style="max-height:240px;overflow-y:auto">
+                                    <div class="text-secondary small">尚未读取 RSS 任务列表</div>
+                                </div>
+                                <div class="form-hint mt-1">保存的是所选任务的内部 ID；原有 RSS ID 配置会自动匹配并保留。</div>
                             </div>
                         </div>
                     </div>
@@ -574,7 +580,7 @@
         document.getElementById('qb_user').value = config.qb_config?.user||''; document.getElementById('qb_pass').value = config.qb_config?.password||''; document.getElementById('qb_port').value = config.qb_config?.port||''; 
         document.getElementById('vt_url').value = config.vertex_config?.api_url||''; document.getElementById('vt_user').value = config.vertex_config?.api_user||''; document.getElementById('vt_pass').value = config.vertex_config?.api_password||''; document.getElementById('vt_container').value = config.vertex_config?.container_name||'vertex';
         document.getElementById('master_api_url').value = config.master_api_url || ''; document.getElementById('master_api_key').value = config.master_api_key || '';
-        document.getElementById('rss_ids').value = (config.rss_ids || []).join(', ');
+        renderRssRules();
         document.getElementById('keep_cats').value = (config.keep_categories||[]).join(','); 
         document.getElementById('hr_cats').value = (config.hr_config?.categories || []).join(','); document.getElementById('hr_limit').value = config.hr_config?.upload_limit_kb || 10;
         document.getElementById('notify_mode').value = config.notify_mode || 'telegram'; toggleNotifyFields();
@@ -616,10 +622,10 @@
         config.master_api_key=document.getElementById('master_api_key').value.trim();
         delete config.scp_config; delete config.soap_config;
         config.qb_config={user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value) || 8080};
-        config.vertex_config={api_url:document.getElementById('vt_url').value,api_user:document.getElementById('vt_user').value,api_password:document.getElementById('vt_pass').value,container_name:document.getElementById('vt_container').value};
+        config.vertex_config={...(config.vertex_config||{}),api_url:document.getElementById('vt_url').value,api_user:document.getElementById('vt_user').value,api_password:document.getElementById('vt_pass').value,container_name:document.getElementById('vt_container').value};
         delete config.rss_dir; 
         
-        config.rss_ids = cleanSplit(document.getElementById('rss_ids').value);
+        config.rss_ids = Array.from(new Set((config.rss_ids || []).map(String)));
         config.keep_categories= cleanSplit(document.getElementById('keep_cats').value);
         config.hr_config = { 
             categories: cleanSplit(document.getElementById('hr_cats').value), 
@@ -632,6 +638,7 @@
         config.wechat_config = { key: document.getElementById('wx_key').value };
         config.wechat_app_config = { corpid: document.getElementById('wx_app_corpid').value, agentid: document.getElementById('wx_app_agentid').value, secret: document.getElementById('wx_app_secret').value };
 
+        (config.servers||[]).forEach(s => { if (s.master_server_id) { const m=masterInstances.find(x=>String(x.id)===String(s.master_server_id)); if(m) applyMasterInstance(s,m); } });
         const np=document.getElementById('admin_pass').value; if(np)config.admin_password=np;
         fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)}).then(r=>r.json()).then(res=>showToast(res.status==='success'?'配置已保存':'保存失败',res.status==='success'?'success':'error'));
     }
@@ -648,6 +655,7 @@
             const data = await r.json();
             if (!r.ok || data.status !== 'success') throw new Error(data.message || '连接失败');
             masterInstances = data.instances || [];
+            (config.servers||[]).forEach(s => { if (s.master_server_id) { const m=masterInstances.find(x=>String(x.id)===String(s.master_server_id)); if(m) applyMasterInstance(s,m); } });
             config.master_api_url = payload.master_api_url; config.master_api_key = payload.master_api_key;
             resultBox.innerText = data.message + '\\n' + masterInstances.map(x => x.id + ' | ' + x.name + ' | ' + x.ip + ' | ' + (x.throttled ? '限速' : '正常')).join('\\n');
             showToast('主控机连接成功', 'success');
