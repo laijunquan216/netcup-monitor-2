@@ -576,6 +576,103 @@
     }
 
     function fetchConfig() { if(!isLoggedIn)return; fetch('/api/config').then(r=>r.json()).then(d => { config = d; renderForms(); if(config.master_api_url && config.master_api_key) testMasterConnection(); }); }
+    let vertexRssRules = [];
+
+    function escapeHtml(value) {
+        return String(value ?? '').replace(/[&<>"']/g, ch => ({
+            '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
+        }[ch]));
+    }
+
+    function applyMasterInstance(server, instance) {
+        server.master_server_id = String(instance.id);
+        server.name = instance.name || server.name || '';
+        server.ip = instance.ip || server.ip || '';
+        const clientId = instance.client_id ?? instance.vertex_client_id ?? instance.clientId ?? instance.client?.id;
+        if (clientId !== undefined && clientId !== null && String(clientId).trim() !== '') {
+            server.client_id = String(clientId);
+        }
+    }
+
+    function bindMasterInstance(index, instanceId) {
+        const server = config.servers[index];
+        if (!server) return;
+        if (!instanceId) {
+            server.master_server_id = '';
+            renderForms();
+            return;
+        }
+        const matches = masterInstances.filter(x => String(x.id) === String(instanceId));
+        if (matches.length !== 1) {
+            showToast('主控机实例匹配不唯一，请重新连接主控机检查', 'error');
+            return;
+        }
+        applyMasterInstance(server, matches[0]);
+        renderForms();
+        showToast('已自动填写实例名称、IP 和可用的 Client ID', 'success');
+    }
+
+    async function loadVertexRssRules() {
+        if (!isLoggedIn) return;
+        const status = document.getElementById('rssRuleStatus');
+        const payload = {
+            ...config,
+            vertex_config: {
+                ...(config.vertex_config || {}),
+                api_url: document.getElementById('vt_url').value.trim(),
+                api_user: document.getElementById('vt_user').value.trim(),
+                api_password: document.getElementById('vt_pass').value,
+                container_name: document.getElementById('vt_container').value.trim()
+            }
+        };
+        status.innerText = '正在连接 Vertex 并读取 RSS 任务列表...';
+        try {
+            const response = await fetch('/api/vertex/rss-rules', {
+                method: 'POST',
+                headers: {'Content-Type':'application/json'},
+                body: JSON.stringify(payload)
+            });
+            const data = await response.json();
+            if (!response.ok || data.status !== 'success') throw new Error(data.message || '读取失败');
+            vertexRssRules = Array.isArray(data.rules) ? data.rules : [];
+            renderRssRules();
+            status.innerText = `读取成功：共 ${vertexRssRules.length} 个 RSS 任务`;
+            if (!vertexRssRules.length) status.innerText += '（Vertex 当前没有可选任务）';
+        } catch (error) {
+            vertexRssRules = [];
+            renderRssRules();
+            status.innerText = '读取失败：' + error.message;
+        }
+    }
+
+    function renderRssRules() {
+        const box = document.getElementById('rssRuleList');
+        if (!box) return;
+        if (!vertexRssRules.length) {
+            if (!box.dataset.loaded) box.innerHTML = '<div class="text-secondary small">尚未读取 RSS 任务列表</div>';
+            else box.innerHTML = '<div class="text-secondary small">没有可显示的 RSS 任务</div>';
+            return;
+        }
+        const selected = new Set((config.rss_ids || []).map(String));
+        box.dataset.loaded = '1';
+        box.innerHTML = vertexRssRules.map(rule => {
+            const id = String(rule.id);
+            return `<label class="d-flex align-items-center gap-2 py-1 border-bottom small">
+                <input class="form-check-input mt-0" type="checkbox" value="${escapeHtml(id)}" ${selected.has(id) ? 'checked' : ''}
+                    onchange="toggleRssRule(this.value,this.checked)">
+                <span class="flex-grow-1">${escapeHtml(rule.alias)}</span>
+                <code class="text-secondary">${escapeHtml(id)}</code>
+            </label>`;
+        }).join('');
+    }
+
+    function toggleRssRule(id, checked) {
+        const selected = new Set((config.rss_ids || []).map(String));
+        if (checked) selected.add(String(id));
+        else selected.delete(String(id));
+        config.rss_ids = Array.from(selected);
+    }
+
     function renderForms() {
         document.getElementById('qb_user').value = config.qb_config?.user||''; document.getElementById('qb_pass').value = config.qb_config?.password||''; document.getElementById('qb_port').value = config.qb_config?.port||''; 
         document.getElementById('vt_url').value = config.vertex_config?.api_url||''; document.getElementById('vt_user').value = config.vertex_config?.api_user||''; document.getElementById('vt_pass').value = config.vertex_config?.api_password||''; document.getElementById('vt_container').value = config.vertex_config?.container_name||'vertex';
@@ -596,9 +693,9 @@
                 <div class="cfg-ip"><input class="form-control form-control-sm font-mono" placeholder="IP" value="${s.ip}" onchange="updateArr('servers',${i},'ip',this.value)"></div>
                 <div class="cfg-id">
                     <input class="form-control form-control-sm font-mono mb-1" placeholder="Client ID" value="${s.client_id||''}" onchange="updateArr('servers',${i},'client_id',this.value)">
-                    <select class="form-select form-select-sm" onchange="updateArr('servers',${i},'master_server_id',this.value)">
+                    <select class="form-select form-select-sm" onchange="bindMasterInstance(${i},this.value)">
                         <option value="">绑定主控机实例</option>
-                        ${masterInstances.map(x => '<option value="'+x.id+'" '+(String(s.master_server_id||'')===String(x.id)?'selected':'')+'>'+x.name+' ('+x.ip+') · ID '+x.id+'</option>').join('')}
+${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.master_server_id||'')===String(x.id)?'selected':'')+'>'+escapeHtml(x.name)+' ('+escapeHtml(x.ip)+') · ID '+escapeHtml(x.id)+'</option>').join('')}
                     </select>
                 </div>
                 <div class="cfg-mode"><div class="form-check form-switch d-flex align-items-center justify-content-between w-100"><label class="small text-secondary me-2">不托管</label><input class="form-check-input" type="checkbox" ${s.unmanaged?'checked':''} onchange="updateArr('servers',${i},'unmanaged',this.checked)"></div></div>
