@@ -879,7 +879,12 @@ def run_monitor_task():
                 up, dl = int(raw_up), int(raw_dl)
                 if up < 0 or dl < 0:
                     raise ValueError("累计流量不能为负数")
-                traffic_valid = True
+                if up == 0 and dl == 0:
+                    # qB 初始化/maindata 尚未提供有效累计值时，不建立 0 基线，
+                    # 避免下一次返回历史累计值时被误算成一次巨额增量。
+                    logger.info(f"[{name}] QB alltime 为 0/0，等待首个有效累计值")
+                else:
+                    traffic_valid = True
             except (ValueError, TypeError, AttributeError) as exc:
                 logger.warning(f"[{name}] QB maindata 数据无效，跳过流量采样: {exc}")
 
