@@ -588,7 +588,12 @@
         server.master_server_id = String(instance.id);
         server.name = instance.name || server.name || '';
         server.ip = instance.ip || server.ip || '';
-        const clientId = instance.client_id ?? instance.vertex_client_id ?? instance.clientId ?? instance.client?.id;
+        const sameIpServer = (config.servers || []).find(item =>
+            item !== server && String(item.ip || '').trim() === String(instance.ip || '').trim()
+            && String(item.client_id || '').trim()
+        );
+        const clientId = instance.client_id ?? instance.vertex_client_id ?? instance.clientId ?? instance.client?.id
+            ?? (sameIpServer ? sameIpServer.client_id : undefined);
         if (clientId !== undefined && clientId !== null && String(clientId).trim() !== '') {
             server.client_id = String(clientId);
         }
@@ -609,7 +614,7 @@
         }
         applyMasterInstance(server, matches[0]);
         renderForms();
-        showToast('已自动填写实例名称、IP 和可用的 Client ID', 'success');
+        showToast(server.client_id ? '已自动填写名称、IP 和 Client ID' : '已填写名称和 IP；此实例没有可复用的 Client ID，请补充 Vertex 下载器 ID', server.client_id ? 'success' : 'info');
     }
 
     async function loadVertexRssRules() {
