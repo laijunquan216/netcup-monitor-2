@@ -847,6 +847,34 @@ def test_master():
         return jsonify({"status": "error", "message": str(exc)}), 502
 
 
+@app.route('/api/vertex/rss-rules', methods=['POST'])
+def get_vertex_rss_rules():
+    """读取 Vertex RSS 任务列表，仅向已登录管理员提供别名与 ID。"""
+    if not session.get('logged_in'):
+        return jsonify({"status": "error", "message": "未登录"}), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        client = EnhancedVertexClient(payload)
+        rules = client.list_rss_rules()
+        if rules is None:
+            return jsonify({"status": "error", "message": "无法读取 Vertex RSS 列表，请检查地址、账号密码及连接状态"}), 502
+        result = []
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            rule_id = rule.get("id")
+            if rule_id is None:
+                continue
+            result.append({
+                "id": str(rule_id),
+                "alias": str(rule.get("alias") or rule.get("name") or f"未命名任务 {rule_id}")
+            })
+        return jsonify({"status": "success", "rules": result})
+    except Exception as exc:
+        logger.error(f"读取 Vertex RSS 列表失败: {exc}")
+        return jsonify({"status": "error", "message": str(exc)}), 502
+
+
 @app.route('/api/test_qb', methods=['POST'])
 def test_qb():
     """测试单个或全局 qBittorrent 连通性"""

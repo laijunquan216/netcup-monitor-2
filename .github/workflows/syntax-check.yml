@@ -14,3 +14,16 @@ jobs:
           python-version: "3.x"
       - name: Syntax check (py_compile)
         run: python -m py_compile app.py backfill_traffic_history.py
+
+      - name: Syntax check (inline JavaScript)
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+          html = Path("templates/index.html").read_text(encoding="utf-8")
+          scripts = re.findall(r'<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>', html, re.S | re.I)
+          for index, script in enumerate(scripts):
+              Path(f"/tmp/netcup-inline-{index}.js").write_text(script, encoding="utf-8")
+          print(f"Extracted {len(scripts)} inline script blocks")
+          PY
+          for file in /tmp/netcup-inline-*.js; do node --check "$file"; done
