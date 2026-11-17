@@ -279,8 +279,10 @@
                         <div class="mb-3 row align-items-center">
                             <label class="col-sm-3 col-form-label">监控 RSS 任务</label>
                             <div class="col-sm-9">
-                                <div class="d-flex gap-2 align-items-center mb-2">
+                                <div class="d-flex gap-2 align-items-center flex-wrap mb-2">
                                     <button type="button" class="btn btn-sm btn-outline-primary" onclick="loadVertexRssRules()">读取 Vertex RSS 任务</button>
+                                    <button type="button" id="rssSaveBtn" class="btn btn-sm btn-primary d-none" onclick="saveRssRuleSelection()">保存选择</button>
+                                    <button type="button" id="rssEditBtn" class="btn btn-sm btn-outline-secondary d-none" onclick="editRssRuleSelection()">修改选择</button>
                                     <span id="rssRuleStatus" class="form-hint">连接 Vertex 后自动读取任务别名，勾选需要联动的任务</span>
                                 </div>
                                 <div id="rssRuleList" class="border rounded p-2" style="max-height:240px;overflow-y:auto">
@@ -577,6 +579,7 @@
 
     function fetchConfig() { if(!isLoggedIn)return; fetch('/api/config').then(r=>r.json()).then(d => { config = d; renderForms(); if(config.master_api_url && config.master_api_key) testMasterConnection(); }); }
     let vertexRssRules = [];
+    let rssRulesCollapsed = false;
 
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, ch => ({
@@ -652,14 +655,31 @@
 
     function renderRssRules() {
         const box = document.getElementById('rssRuleList');
+        const saveBtn = document.getElementById('rssSaveBtn');
+        const editBtn = document.getElementById('rssEditBtn');
         if (!box) return;
         if (!vertexRssRules.length) {
+            if (saveBtn) saveBtn.classList.add('d-none');
+            if (editBtn) editBtn.classList.add('d-none');
             if (!box.dataset.loaded) box.innerHTML = '<div class="text-secondary small">尚未读取 RSS 任务列表</div>';
             else box.innerHTML = '<div class="text-secondary small">没有可显示的 RSS 任务</div>';
             return;
         }
         const selected = new Set((config.rss_ids || []).map(String));
         box.dataset.loaded = '1';
+        if (rssRulesCollapsed) {
+            const chosen = vertexRssRules.filter(rule => selected.has(String(rule.id)));
+            box.innerHTML = chosen.length
+                ? chosen.map(rule => `<div class="d-flex align-items-center gap-2 py-1 border-bottom small">
+                    <i class="bi bi-check-circle-fill text-primary"></i>
+                    <span class="flex-grow-1">${escapeHtml(rule.alias)}</span>
+                    <code class="text-secondary">${escapeHtml(String(rule.id))}</code>
+                </div>`).join('')
+                : '<div class="text-secondary small">尚未勾选 RSS 任务</div>';
+            if (saveBtn) saveBtn.classList.add('d-none');
+            if (editBtn) editBtn.classList.remove('d-none');
+            return;
+        }
         box.innerHTML = vertexRssRules.map(rule => {
             const id = String(rule.id);
             return `<label class="d-flex align-items-center gap-2 py-1 border-bottom small">
@@ -669,6 +689,20 @@
                 <code class="text-secondary">${escapeHtml(id)}</code>
             </label>`;
         }).join('');
+        if (saveBtn) saveBtn.classList.remove('d-none');
+        if (editBtn) editBtn.classList.add('d-none');
+    }
+
+    function saveRssRuleSelection() {
+        rssRulesCollapsed = true;
+        renderRssRules();
+        const count = (config.rss_ids || []).length;
+        showToast(`已保存选择：${count} 个 RSS 任务。请再点击页面顶部“保存设置”写入配置`, 'success');
+    }
+
+    function editRssRuleSelection() {
+        rssRulesCollapsed = false;
+        renderRssRules();
     }
 
     function toggleRssRule(id, checked) {
