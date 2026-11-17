@@ -153,7 +153,7 @@
             <li class="nav-item"><button class="nav-link" onclick="switchTab('traffic')"><i class="bi bi-bar-chart me-2"></i>双轨流量</button></li>
             <li class="nav-item protected-tab d-none"><button class="nav-link" onclick="switchTab('servers')"><i class="bi bi-hdd-rack me-2"></i>实例配置</button></li>
             <li class="nav-item protected-tab d-none"><button class="nav-link" onclick="switchTab('global')"><i class="bi bi-sliders me-2"></i>全局设置</button></li>
-            <li class="nav-item protected-tab d-none"><button class="nav-link" onclick="switchTab('accounts')"><i class="bi bi-person-badge me-2"></i>SCP账号</button></li>
+            <li class="nav-item protected-tab d-none"><button class="nav-link" onclick="switchTab('accounts')"><i class="bi bi-person-badge me-2"></i>主控机 API</button></li>
             <li class="nav-item protected-tab d-none"><button class="nav-link" onclick="switchTab('logs'); loadLogs()"><i class="bi bi-terminal me-2"></i>运行日志</button></li>
         </ul>
     </div>
@@ -383,25 +383,23 @@
             </div>
         </div>
 
-        <!-- SCP 账号 Tab -->
+        <!-- 主控机 API Tab -->
         <div id="view-accounts" class="tab-view d-none">
-             <div class="white-card">
+            <div class="white-card">
                 <div class="card-header-custom">
-                    <div class="card-title">Netcup SCP 账号 (REST API)</div>
-                    <div>
-                        <button class="btn btn-sm btn-outline-primary me-2" onclick="testScpConnection()"><i class="bi bi-patch-check"></i> 测试连接</button>
-                        <button class="btn btn-sm btn-primary" onclick="addSoapRow()"><i class="bi bi-plus-lg"></i> 添加账号</button>
-                    </div>
+                    <div class="card-title">主控机 VPS- 限速状态接口</div>
+                    <button class="btn btn-sm btn-outline-primary" onclick="testMasterConnection()"><i class="bi bi-plug"></i> 测试连接并获取实例</button>
                 </div>
-                <div class="config-header">
-                    <div class="cfg-soap-id">客户号 (Customer ID)</div>
-                    <div class="cfg-soap-pass">SCP 密码</div>
-                    <div class="cfg-soap-action">操作</div>
+                <div class="mb-3">
+                    <label class="form-label">主控机 API 地址</label>
+                    <input id="master_api_url" class="form-control" placeholder="https://panel.example.com">
                 </div>
-                <div id="soapContainer"></div>
-                <div class="mt-3 p-3 bg-light rounded small text-secondary">
-                    <i class="bi bi-info-circle me-1"></i> Netcup 已切换至全新 SCP REST API。输入您的 Netcup 客户号（如 <code>123456</code>）与 SCP 登录密码即可自动完成 Keycloak 认证与状态同步。
+                <div class="mb-3">
+                    <label class="form-label">受控机专属 API 密钥</label>
+                    <input id="master_api_key" type="password" class="form-control" autocomplete="new-password" placeholder="粘贴主控机生成的一次性密钥">
                 </div>
+                <div class="small text-secondary mb-3">保存后点击测试连接。主控机只返回此密钥获准访问的实例。请在“实例配置”中为每台本地服务器选择对应的主控机实例。</div>
+                <div id="masterApiResult" class="alert alert-secondary small mb-0">尚未测试连接</div>
             </div>
         </div>
 
@@ -420,7 +418,7 @@
 
 <script src="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
 <script>
-    let rawData = []; let config = {}; let currentFilter = 'all'; let isLoggedIn = false; let showIPs = false;
+    let rawData = []; let config = {}; let currentFilter = 'all'; let isLoggedIn = false; let showIPs = false; let masterInstances = [];
     let healthChart = null;
     let trafficChart = null;
     const chartColors = [
@@ -575,7 +573,7 @@
     function renderForms() {
         document.getElementById('qb_user').value = config.qb_config?.user||''; document.getElementById('qb_pass').value = config.qb_config?.password||''; document.getElementById('qb_port').value = config.qb_config?.port||''; 
         document.getElementById('vt_url').value = config.vertex_config?.api_url||''; document.getElementById('vt_user').value = config.vertex_config?.api_user||''; document.getElementById('vt_pass').value = config.vertex_config?.api_password||''; document.getElementById('vt_container').value = config.vertex_config?.container_name||'vertex';
-        document.getElementById('rss_ids').value = (config.rss_ids || []).join(', ');
+        document.getElementById('master_api_url').value = config.master_api_url || ''; document.getElementById('master_api_key').value = config.master_api_key || '';\n        document.getElementById('rss_ids').value = (config.rss_ids || []).join(', ');
         document.getElementById('keep_cats').value = (config.keep_categories||[]).join(','); 
         document.getElementById('hr_cats').value = (config.hr_config?.categories || []).join(','); document.getElementById('hr_limit').value = config.hr_config?.upload_limit_kb || 10;
         document.getElementById('notify_mode').value = config.notify_mode || 'telegram'; toggleNotifyFields();
@@ -589,7 +587,13 @@
             sc.innerHTML += `<div class="config-row">
                 <div class="cfg-name"><input class="form-control form-control-sm" placeholder="名称" value="${s.name}" onchange="updateArr('servers',${i},'name',this.value)"></div>
                 <div class="cfg-ip"><input class="form-control form-control-sm font-mono" placeholder="IP" value="${s.ip}" onchange="updateArr('servers',${i},'ip',this.value)"></div>
-                <div class="cfg-id"><input class="form-control form-control-sm font-mono" placeholder="Client ID" value="${s.client_id||''}" onchange="updateArr('servers',${i},'client_id',this.value)"></div>
+                <div class="cfg-id">
+                    <input class="form-control form-control-sm font-mono mb-1" placeholder="Client ID" value="${s.client_id||''}" onchange="updateArr('servers',${i},'client_id',this.value)">
+                    <select class="form-select form-select-sm" onchange="updateArr('servers',${i},'master_server_id',this.value)">
+                        <option value="">绑定主控机实例</option>
+                        ${masterInstances.map(x => '<option value="'+x.id+'" '+(String(s.master_server_id||'')===String(x.id)?'selected':'')+'>'+x.name+' ('+x.ip+') · ID '+x.id+'</option>').join('')}
+                    </select>
+                </div>
                 <div class="cfg-mode"><div class="form-check form-switch d-flex align-items-center justify-content-between w-100"><label class="small text-secondary me-2">不托管</label><input class="form-check-input" type="checkbox" ${s.unmanaged?'checked':''} onchange="updateArr('servers',${i},'unmanaged',this.checked)"></div></div>
                 <div class="cfg-action d-flex gap-1 justify-content-end">
                     <button class="btn btn-sm btn-light text-primary border-0" title="测试此 qB" onclick="testQbSingle('${s.ip}')"><i class="bi bi-hdd-network"></i></button>
@@ -597,47 +601,17 @@
                 </div>
             </div>`;
         });
-        const ac = document.getElementById('soapContainer'); ac.innerHTML='';
-        (config.soap_config?.accounts || config.scp_config?.accounts || []).forEach((a,i) => {
-            ac.innerHTML += `<div class="config-row">
-                <div class="cfg-soap-id"><input class="form-control form-control-sm font-mono" placeholder="Customer ID" value="${a.customer_number || a.username || ''}" onchange="updateArr('accounts',${i},'customer_number',this.value)"></div>
-                <div class="cfg-soap-pass"><input class="form-control form-control-sm font-mono" type="password" placeholder="SCP 密码" value="${a.password || ''}" onchange="updateArr('accounts',${i},'password',this.value)"></div>
-                <div class="cfg-soap-action"><button class="btn btn-sm btn-light text-danger border-0" onclick="removeArr('accounts',${i})"><i class="bi bi-trash-fill"></i></button></div>
-            </div>`;
-        });
     }
-    function updateArr(t,i,k,v){
-        if(t==='servers') {
-            config.servers[i][k]=v;
-        } else {
-            if (!config.scp_config) config.scp_config = config.soap_config || { accounts: [] };
-            if (!config.scp_config.accounts) config.scp_config.accounts = [];
-            config.scp_config.accounts[i][k]=v;
-            config.soap_config = config.scp_config;
-        }
-    }
-    function removeArr(t,i){
-        if(t==='servers') config.servers.splice(i,1);
-        else {
-            if (config.scp_config?.accounts) config.scp_config.accounts.splice(i,1);
-            if (config.soap_config?.accounts) config.soap_config.accounts.splice(i,1);
-        }
-        renderForms();
-    }
+    function updateArr(t,i,k,v){ if(t==='servers') config.servers[i][k]=v; }
+    function removeArr(t,i){ if(t==='servers') config.servers.splice(i,1); renderForms(); }
     function addServerRow(){if(!config.servers)config.servers=[];config.servers.push({name:'New',ip:'',client_id:'',unmanaged:false});renderForms();}
-    function addSoapRow(){
-        if(!config.scp_config) config.scp_config = { accounts: [] };
-        if(!config.scp_config.accounts) config.scp_config.accounts = [];
-        config.scp_config.accounts.push({customer_number:'', password:''});
-        config.soap_config = config.scp_config;
-        renderForms();
-    }
+
     
     function saveConfig() {
         if(!isLoggedIn)return; 
         const cleanSplit = (str) => str.replace(/，/g, ',').split(',').map(s=>s.trim()).filter(x=>x);
 
-        config.qb_config={user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value) || 8080};
+        config.master_api_url=document.getElementById('master_api_url').value.trim();\n        config.master_api_key=document.getElementById('master_api_key').value.trim();\n        config.qb_config={user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value) || 8080};
         config.vertex_config={api_url:document.getElementById('vt_url').value,api_user:document.getElementById('vt_user').value,api_password:document.getElementById('vt_pass').value,container_name:document.getElementById('vt_container').value};
         delete config.rss_dir; 
         
@@ -660,24 +634,24 @@
     
     function triggerRun() { fetch('/api/run_now', {method:'POST'}).then(()=>showToast('已触发后台巡检')); }
     
-    function testScpConnection() {
+    async function testMasterConnection() {
         if(!isLoggedIn) return;
-        showToast('正在测试 Netcup SCP 连接...', 'info');
-        fetch('/api/test_scp', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(config)
-        }).then(r => r.json()).then(res => {
-            let msg = res.message || '连接测试完成';
-            if (res.details && res.details.length > 0) {
-                msg += '\n\n' + res.details.join('\n');
-            }
-            alert(msg);
-            showToast(res.status === 'success' ? 'SCP 连接测试成功' : 'SCP 连接测试失败', res.status === 'success' ? 'success' : 'error');
-        }).catch(err => {
-            alert('请求异常: ' + err);
-            showToast('请求异常', 'error');
-        });
+        const payload = {...config, master_api_url: document.getElementById('master_api_url').value.trim(), master_api_key: document.getElementById('master_api_key').value.trim()};
+        const resultBox = document.getElementById('masterApiResult');
+        resultBox.innerText = '正在连接主控机...';
+        try {
+            const r = await fetch('/api/test_master', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
+            const data = await r.json();
+            if (!r.ok || data.status !== 'success') throw new Error(data.message || '连接失败');
+            masterInstances = data.instances || [];
+            resultBox.innerText = data.message + '\\n' + masterInstances.map(x => x.id + ' | ' + x.name + ' | ' + x.ip + ' | ' + (x.throttled ? '限速' : '正常')).join('\\n');
+            showToast('主控机连接成功', 'success');
+            renderForms();
+        } catch (err) {
+            masterInstances = [];
+            resultBox.innerText = '连接失败：' + err.message;
+            showToast('主控机连接失败', 'error');
+        }
     }
 
     function testQbAll() {
