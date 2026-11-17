@@ -573,7 +573,8 @@
     function renderForms() {
         document.getElementById('qb_user').value = config.qb_config?.user||''; document.getElementById('qb_pass').value = config.qb_config?.password||''; document.getElementById('qb_port').value = config.qb_config?.port||''; 
         document.getElementById('vt_url').value = config.vertex_config?.api_url||''; document.getElementById('vt_user').value = config.vertex_config?.api_user||''; document.getElementById('vt_pass').value = config.vertex_config?.api_password||''; document.getElementById('vt_container').value = config.vertex_config?.container_name||'vertex';
-        document.getElementById('master_api_url').value = config.master_api_url || ''; document.getElementById('master_api_key').value = config.master_api_key || '';\n        document.getElementById('rss_ids').value = (config.rss_ids || []).join(', ');
+        document.getElementById('master_api_url').value = config.master_api_url || ''; document.getElementById('master_api_key').value = config.master_api_key || '';
+        document.getElementById('rss_ids').value = (config.rss_ids || []).join(', ');
         document.getElementById('keep_cats').value = (config.keep_categories||[]).join(','); 
         document.getElementById('hr_cats').value = (config.hr_config?.categories || []).join(','); document.getElementById('hr_limit').value = config.hr_config?.upload_limit_kb || 10;
         document.getElementById('notify_mode').value = config.notify_mode || 'telegram'; toggleNotifyFields();
@@ -611,7 +612,9 @@
         if(!isLoggedIn)return; 
         const cleanSplit = (str) => str.replace(/，/g, ',').split(',').map(s=>s.trim()).filter(x=>x);
 
-        config.master_api_url=document.getElementById('master_api_url').value.trim();\n        config.master_api_key=document.getElementById('master_api_key').value.trim();\n        config.qb_config={user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value) || 8080};
+        config.master_api_url=document.getElementById('master_api_url').value.trim();
+        config.master_api_key=document.getElementById('master_api_key').value.trim();
+        config.qb_config={user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value) || 8080};
         config.vertex_config={api_url:document.getElementById('vt_url').value,api_user:document.getElementById('vt_user').value,api_password:document.getElementById('vt_pass').value,container_name:document.getElementById('vt_container').value};
         delete config.rss_dir; 
         
