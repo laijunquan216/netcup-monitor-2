@@ -318,244 +318,26 @@ def get_daily_trends(conn, server_list):
 
     return dates, trends
 
-# ===================== Netcup SCP REST 客户端 =====================
-class NetcupScpClient:
-    def __init__(self, config):
-        self.config = config
-        self.scp_conf = config.get("scp_config") or config.get("soap_config", {})
-        self.token_cache = {}
-        self.keycloak_url = "https://www.servercontrolpanel.de/realms/scp/protocol/openid-connect/token"
-        self.base_url = "https://www.servercontrolpanel.de/scp-core/api/v1"
+def fetch_master_instances(config):
+    """从主控机读取当前密钥获准访问的实例。"""
+    base_url = str(config.get("master_api_url") or "").strip().rstrip("/")
+    api_key = str(config.get("master_api_key") or "").strip()
+    if not base_url or not api_key:
+        raise RuntimeError("请先配置主控机 API 地址和受控机专属密钥")
+    if not base_url.startswith(("http://", "https://")):
+        base_url = "https://" + base_url
+    response = requests.get(
+        f"{base_url}/api/v1/instances",
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        timeout=15,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"主控机 API 请求失败：HTTP {response.status_code}")
+    payload = response.json()
+    if not payload.get("ok") or not isinstance(payload.get("instances"), list):
+        raise RuntimeError("主控机 API 返回数据格式无效")
+    return payload["instances"]
 
-    def get_token(self, account):
-        acc_key = str(account.get("customer_number") or account.get("username") or account.get("user") or "")
-        pwd = account.get("password", "")
-        refresh_tok = account.get("refresh_token") or self.token_cache.get(acc_key, {}).get("refresh_token")
-        
-        cached = self.token_cache.get(acc_key)
-        now = time.time()
-        if cached and cached.get("access_token") and cached.get("expires_at", 0) > now + 30:
-            return cached.get("access_token")
-            
-        # 1. 尝试使用 Refresh Token 刷新
-        if refresh_tok:
-            try:
-                r = requests.post(
-                    self.keycloak_url,
-                    data={"client_id": "scp", "grant_type": "refresh_token", "refresh_token": refresh_tok},
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    timeout=15
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    access_token = data.get("access_token")
-                    new_refresh = data.get("refresh_token", refresh_tok)
-                    expires_in = data.get("expires_in", 300)
-                    self.token_cache[acc_key] = {
-                        "access_token": access_token,
-                        "refresh_token": new_refresh,
-                        "expires_at": now + expires_in
-                    }
-                    logger.info(f"Netcup SCP Token 刷新成功 (账号: {acc_key})")
-                    return access_token
-                else:
-                    logger.warning(f"Netcup SCP Refresh Token 刷新失败 (账号: {acc_key}): {r.status_code}")
-            except Exception as e:
-                logger.error(f"Netcup SCP Refresh Token 请求异常 (账号: {acc_key}): {e}")
-
-        # 2. 尝试使用密码登录
-        if acc_key and pwd:
-            try:
-                r = requests.post(
-                    self.keycloak_url,
-                    data={"client_id": "scp", "grant_type": "password", "username": acc_key, "password": pwd},
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                    timeout=15
-                )
-                if r.status_code == 200:
-                    data = r.json()
-                    access_token = data.get("access_token")
-                    refresh_token = data.get("refresh_token")
-                    expires_in = data.get("expires_in", 300)
-                    self.token_cache[acc_key] = {
-                        "access_token": access_token,
-                        "refresh_token": refresh_token,
-                        "expires_at": now + expires_in
-                    }
-                    logger.info(f"Netcup SCP 登录成功，已获取 Token (账号: {acc_key})")
-                    return access_token
-                else:
-                    err_msg = r.text
-                    try:
-                        err_json = r.json()
-                        err_msg = err_json.get("error_description") or err_json.get("error") or err_msg
-                    except Exception: pass
-                    logger.error(f"Netcup SCP 认证失败 (账号: {acc_key}): HTTP {r.status_code} - {err_msg}")
-                    return None
-            except Exception as e:
-                logger.error(f"Netcup SCP 认证请求异常 (账号: {acc_key}): {e}")
-                return None
-                
-        logger.warning(f"Netcup SCP 账号缺少认证信息: {acc_key}")
-        return None
-
-    def get_vps_details_and_status(self, target_ips=None):
-        """
-        查询所有配置的 SCP 账号，返回限速状态及官方网卡流量数据
-        返回: (vps_status: dict, vps_netcup_info: dict)
-        """
-        vps_status = {}
-        vps_netcup_info = {}
-        accounts = self.scp_conf.get("accounts", [])
-        if not accounts:
-            return vps_status, vps_netcup_info
-            
-        for acc in accounts:
-            acc_name = acc.get("customer_number") or acc.get("username") or "未知"
-            token = self.get_token(acc)
-            if not token:
-                continue
-                
-            headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-            
-            try:
-                r_servers = requests.get(f"{self.base_url}/servers", headers=headers, timeout=15)
-                if r_servers.status_code == 401:
-                    acc_key = str(acc.get("customer_number") or acc.get("username") or "")
-                    if acc_key in self.token_cache:
-                        del self.token_cache[acc_key]
-                    token = self.get_token(acc)
-                    if not token: continue
-                    headers["Authorization"] = f"Bearer {token}"
-                    r_servers = requests.get(f"{self.base_url}/servers", headers=headers, timeout=15)
-                    
-                if r_servers.status_code != 200:
-                    logger.error(f"Netcup SCP 获取服务器列表失败 ({acc_name}): HTTP {r_servers.status_code}")
-                    continue
-                    
-                servers_data = r_servers.json()
-                if not isinstance(servers_data, list): continue
-                    
-                for srv in servers_data:
-                    srv_id = srv.get("id")
-                    srv_name = srv.get("name")
-                    if not srv_id: continue
-                        
-                    r_detail = requests.get(f"{self.base_url}/servers/{srv_id}?loadServerLiveInfo=true", headers=headers, timeout=15)
-                    if r_detail.status_code != 200: continue
-                        
-                    detail = r_detail.json()
-                    server_ips = set()
-                    
-                    for ip_obj in detail.get("ipv4Addresses") or []:
-                        if isinstance(ip_obj, dict) and ip_obj.get("ip"):
-                            server_ips.add(ip_obj.get("ip"))
-                        elif isinstance(ip_obj, str):
-                            server_ips.add(ip_obj)
-                            
-                    for ip_obj in detail.get("ipv6Addresses") or []:
-                        if isinstance(ip_obj, dict):
-                            if ip_obj.get("networkPrefix"): server_ips.add(ip_obj.get("networkPrefix"))
-                            if ip_obj.get("ip"): server_ips.add(ip_obj.get("ip"))
-                        elif isinstance(ip_obj, str):
-                            server_ips.add(ip_obj)
-                            
-                    is_throttled = False
-                    total_rx_mib = 0.0
-                    total_tx_mib = 0.0
-                    speed_mbits = 0
-                    
-                    live_info = detail.get("serverLiveInfo") or {}
-                    interfaces = live_info.get("interfaces") or []
-                    
-                    if not interfaces:
-                        try:
-                            r_if = requests.get(f"{self.base_url}/servers/{srv_id}/interfaces", headers=headers, timeout=10)
-                            if r_if.status_code == 200 and isinstance(r_if.json(), list):
-                                interfaces = r_if.json()
-                        except Exception: pass
-
-                    for iface in interfaces:
-                        if iface.get("trafficThrottled") is True:
-                            is_throttled = True
-                        if iface.get("rxMonthlyInMiB"):
-                            total_rx_mib += float(iface.get("rxMonthlyInMiB", 0))
-                        if iface.get("txMonthlyInMiB"):
-                            total_tx_mib += float(iface.get("txMonthlyInMiB", 0))
-                        if iface.get("speedInMBits"):
-                            speed_mbits = max(speed_mbits, int(iface.get("speedInMBits", 0)))
-                            
-                        for ip_val in iface.get("ipv4Addresses") or []:
-                            if isinstance(ip_val, str):
-                                server_ips.add(ip_val)
-                            elif isinstance(ip_val, dict) and ip_val.get("ip"):
-                                server_ips.add(ip_val.get("ip"))
-                                
-                    info_payload = {
-                        'throttled': is_throttled,
-                        'rx_mib': total_rx_mib,
-                        'tx_mib': total_tx_mib,
-                        'speed_mbits': speed_mbits
-                    }
-
-                    for ip in server_ips:
-                        vps_status[ip] = is_throttled
-                        vps_netcup_info[ip] = info_payload
-                        
-                    if srv_name:
-                        vps_status[srv_name] = is_throttled
-                        vps_netcup_info[srv_name] = info_payload
-                    if detail.get("nickname"):
-                        vps_status[detail.get("nickname")] = is_throttled
-                        vps_netcup_info[detail.get("nickname")] = info_payload
-                    if detail.get("hostname"):
-                        vps_status[detail.get("hostname")] = is_throttled
-                        vps_netcup_info[detail.get("hostname")] = info_payload
-                        
-                    logger.info(f"Netcup 实例 [{srv_name}] (ID: {srv_id}, IPs: {list(server_ips)}): 限速={is_throttled}, 官方月流量=(下行:{total_rx_mib:.1f}MB, 上行:{total_tx_mib:.1f}MB)")
-
-            except Exception as e:
-                logger.error(f"Netcup SCP 批量查询异常 ({acc_name}): {e}")
-                
-        return vps_status, vps_netcup_info
-
-    def test_account(self, account):
-        token = self.get_token(account)
-        acc_key = account.get("customer_number") or account.get("username") or ""
-        if not token:
-            return {"success": False, "message": f"账号 [{acc_key}] 认证失败，请检查客户号或密码"}
-            
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        try:
-            r = requests.get(f"{self.base_url}/servers", headers=headers, timeout=15)
-            if r.status_code != 200:
-                return {"success": False, "message": f"获取服务器列表失败: HTTP {r.status_code}"}
-            servers = r.json()
-            server_summaries = []
-            for srv in servers:
-                srv_id = srv.get("id")
-                srv_name = srv.get("name")
-                r_det = requests.get(f"{self.base_url}/servers/{srv_id}?loadServerLiveInfo=true", headers=headers, timeout=15)
-                if r_det.status_code == 200:
-                    det = r_det.json()
-                    ips = [x.get("ip") for x in (det.get("ipv4Addresses") or []) if isinstance(x, dict) and x.get("ip")]
-                    throttled = False
-                    rx_mib, tx_mib = 0.0, 0.0
-                    for iface in (det.get("serverLiveInfo") or {}).get("interfaces") or []:
-                        if iface.get("trafficThrottled"): throttled = True
-                        rx_mib += float(iface.get("rxMonthlyInMiB") or 0)
-                        tx_mib += float(iface.get("txMonthlyInMiB") or 0)
-                    total_gb = (rx_mib + tx_mib) / 1024
-                    server_summaries.append(f"{srv_name} (IP: {', '.join(ips) or '无'}, 限速: {'是' if throttled else '否'}, 月流量: {total_gb:.2f}GB)")
-                else:
-                    server_summaries.append(f"{srv_name} (ID: {srv_id})")
-            return {
-                "success": True,
-                "message": f"认证成功！找到 {len(servers)} 台实例",
-                "servers": server_summaries
-            }
-        except Exception as e:
-            return {"success": False, "message": f"连接异常: {str(e)}"}
 
 # ===================== Vertex 客户端 =====================
 class EnhancedVertexClient:
@@ -828,6 +610,17 @@ def get_logs():
         logger.error(f"读取日志文件失败: {e}")
         return jsonify({"status": "error", "message": str(e)})
 
+@app.route('/api/master/instances')
+def get_master_instances():
+    if not session.get('logged_in'):
+        return jsonify({"status": "error", "message": "未登录"}), 401
+    try:
+        instances = fetch_master_instances(load_config())
+        return jsonify({"status": "success", "instances": instances})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 502
+
+
 @app.route('/api/stats_advanced')
 def get_stats_advanced():
     cfg = load_config()
@@ -871,32 +664,17 @@ def get_stats_advanced():
         'trends': {'dates': trend_dates, 'data': trends}
     })
 
-@app.route('/api/test_scp', methods=['POST'])
-def test_scp():
-    if not session.get('logged_in'): return jsonify({"status": "error", "message": "未登录"}), 401
-    cfg = request.get_json(silent=True) or load_config()
-    scp_client = NetcupScpClient(cfg)
-    accounts = scp_client.scp_conf.get("accounts", [])
-    if not accounts:
-        return jsonify({"status": "error", "message": "未配置任何 Netcup SCP 账号"})
-    
-    results = []
-    all_success = True
-    for acc in accounts:
-        res = scp_client.test_account(acc)
-        acc_name = acc.get("customer_number") or acc.get("username") or "未知"
-        if res["success"]:
-            results.append(f"【账号 {acc_name}】{res['message']}")
-            for s in res.get("servers", []):
-                results.append(f"  - {s}")
-        else:
-            all_success = False
-            results.append(f"【账号 {acc_name}】失败: {res['message']}")
-            
-    if all_success:
-        return jsonify({"status": "success", "message": "所有 Netcup SCP 账号测试成功", "details": results})
-    else:
-        return jsonify({"status": "error", "message": "部分或全部 SCP 账号连接失败", "details": results})
+@app.route('/api/test_master', methods=['POST'])
+def test_master():
+    if not session.get('logged_in'):
+        return jsonify({"status": "error", "message": "未登录"}), 401
+    payload = request.get_json(silent=True) or {}
+    try:
+        instances = fetch_master_instances(payload)
+        return jsonify({"status": "success", "message": f"主控机连接成功，获取到 {len(instances)} 台授权实例", "instances": instances})
+    except Exception as exc:
+        return jsonify({"status": "error", "message": str(exc)}), 502
+
 
 @app.route('/api/test_qb', methods=['POST'])
 def test_qb():
@@ -989,11 +767,15 @@ def run_monitor_task():
                 logger.warning(f"QB 动作 {action} 失败，尝试 fallback: {fallback[action]}")
                 qb_req(ip, f"/torrents/{fallback[action]}", data={"hashes": hashes})
             
-    # 1. 批量获取 Netcup SCP 状态与官方网卡流量
-    scp_client = NetcupScpClient(config)
-    targets = [s['ip'] for s in SERVERS]
-    vps_status, vps_metrics = scp_client.get_vps_details_and_status(target_ips=targets)
-            
+        # 1. 从主控机读取限速状态；连接失败时本轮失败关闭
+    try:
+        master_instances = fetch_master_instances(config)
+        master_by_id = {str(item.get("id")): item for item in master_instances}
+        master_by_ip = {str(item.get("ip")): item for item in master_instances if item.get("ip")}
+    except Exception as exc:
+        logger.error(f"主控机限速 API 不可用，本轮跳过所有流控动作：{exc}")
+        return
+
     good_clients = []
     
     # 2. 多线程并发巡检各台 VPS 的 qBittorrent 状态与流控
@@ -1007,12 +789,15 @@ def run_monitor_task():
             d = r.json()
             up, dl = d.get('up_info_data', 0), d.get('dl_info_data', 0)
             
-        is_throttled = vps_status.get(ip, vps_status.get(name, False))
+        master_id = str(s.get('master_server_id') or '')
+        master_item = master_by_id.get(master_id) if master_id else master_by_ip.get(ip)
+        if not master_item or 'throttled' not in master_item or not master_item.get('status_available'):
+            logger.error(f"[{name}] 未绑定主控机实例或未获取到限速状态，跳过本轮控制")
+            return
+        is_throttled = bool(master_item.get('throttled'))
         state = 'low' if is_throttled else 'high'
         
-        nc_info = vps_metrics.get(ip, vps_metrics.get(name, {}))
-        nc_rx = nc_info.get('rx_mib', 0.0)
-        nc_tx = nc_info.get('tx_mib', 0.0)
+        nc_rx, nc_tx = 0.0, 0.0
         
         state_changed, old_state = log_to_db(name, state, up, dl, nc_rx, nc_tx)
         
