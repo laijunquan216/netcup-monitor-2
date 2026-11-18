@@ -10,6 +10,7 @@ import secrets
 import hashlib
 import subprocess
 import concurrent.futures
+from urllib.parse import urlparse
 from collections import defaultdict
 from flask import Flask, render_template, request, jsonify, session
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -540,7 +541,7 @@ class EnhancedVertexClient:
         if base_url and not base_url.startswith(('http://', 'https://')): base_url = 'http://' + base_url
         self.base_url = base_url.rstrip('/')
         self.container_name = self.conf.get("container_name", "vertex")
-    def get_new_sid(self):
+    def get_new_sid(self, persist=True):
         try:
             user = self.conf.get("api_user", "")
             pwd = self.conf.get("api_password", "")
@@ -554,7 +555,8 @@ class EnhancedVertexClient:
                     r = s.post(f"{self.base_url}/api/user/login", json=p, timeout=10)
                     if r.status_code in [200, 302] and "connect.sid" in s.cookies:
                         sid = s.cookies["connect.sid"]
-                        self._save_sid(sid)
+                        if persist:
+                            self._save_sid(sid)
                         logger.info("Vertex 重新登录成功，获取新 SID")
                         return sid
                 except Exception: continue
@@ -570,6 +572,72 @@ class EnhancedVertexClient:
             full["vertex_config"]["connect_sid"] = sid
             save_config_file(full)
         except Exception: pass
+    def _do_list_downloaders(self, sid):
+        """调用 Vertex 官方下载器主信息列表接口。"""
+        try:
+            response = requests.get(
+                f"{self.base_url}/api/downloader/listMainInfo",
+                cookies={"connect.sid": sid},
+                headers={"Accept": "application/json"},
+                timeout=12,
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            if not payload.get("success"):
+                return None
+            data = payload.get("data")
+            return data if isinstance(data, list) else None
+        except Exception as exc:
+            logger.warning("读取 Vertex 下载器列表失败: %s", exc)
+            return None
+
+    def list_active_downloader_for_ip(self, target_ip):
+        """只选择已启用、连接正常且 clientUrl 主机 IP 与本机 QB IP 一致的下载器。"""
+        target_ip = str(target_ip or "").strip().strip("[]").lower()
+        if not target_ip or not self.base_url:
+            return {"client_id": None, "reason": "缺少 Vertex 地址或 QB IP", "candidates": []}
+
+        sid = self.conf.get("connect_sid")
+        downloaders = self._do_list_downloaders(sid) if sid else None
+        if downloaders is None:
+            # 此处不覆盖全局 connect.sid；该登录会话仅用于本次自动识别。
+            sid = self.get_new_sid(persist=False)
+            downloaders = self._do_list_downloaders(sid) if sid else None
+        if downloaders is None:
+            return {"client_id": None, "reason": "Vertex 登录失败或下载器列表接口不可用", "candidates": []}
+
+        matches = []
+        active_count = 0
+        for item in downloaders:
+            if not isinstance(item, dict):
+                continue
+            if item.get("enable") is not True or item.get("status") is not True:
+                continue
+            active_count += 1
+            raw_url = str(item.get("clientUrl") or "").strip()
+            try:
+                parsed = urlparse(raw_url if "://" in raw_url else "http://" + raw_url)
+                host = (parsed.hostname or "").strip("[]").lower()
+            except Exception:
+                host = ""
+            if host and host == target_ip and item.get("id") not in (None, ""):
+                matches.append({
+                    "id": str(item["id"]),
+                    "alias": str(item.get("alias") or ""),
+                    "client_url": raw_url,
+                })
+
+        if len(matches) == 1:
+            return {"client_id": matches[0]["id"], "reason": "IP 匹配且下载器已启用、状态正常", "candidates": matches}
+        if len(matches) > 1:
+            return {"client_id": None, "reason": "同一 IP 匹配到多个正常下载器，无法安全确定", "candidates": matches}
+        return {
+            "client_id": None,
+            "reason": f"未找到 IP 匹配的正常下载器（当前正常启用 {active_count} 个）",
+            "candidates": [],
+        }
+
     def list_rss_rules(self):
         sid = self.conf.get("connect_sid")
         data = self._do_list(sid)
@@ -865,9 +933,35 @@ def test_master():
     try:
         instances = fetch_master_instances(payload)
         pt_instances = fetch_master_pt_configs(payload)
+
+        # 每个授权 VPS 使用其 PT-Seedbox 安装输出中的独立 Vertex 凭据，
+        # 登录该 VPS 自己的 Vertex，再按 QB IP 识别已启用且状态正常的下载器 ID。
+        master_by_id = {str(item.get("id")): item for item in instances}
+        for pt_item in pt_instances:
+            pt = pt_item.get("pt_config") if isinstance(pt_item, dict) else None
+            if not isinstance(pt, dict) or not isinstance(pt.get("vertex"), dict):
+                continue
+            vertex_conf = pt["vertex"]
+            qb_conf = pt.get("qb") or {}
+            target_ip = qb_conf.get("host") or pt_item.get("ip") or master_by_id.get(str(pt_item.get("id")), {}).get("ip")
+            if not vertex_conf.get("api_url") or not vertex_conf.get("api_user") or not vertex_conf.get("api_password"):
+                vertex_conf["client_id"] = None
+                vertex_conf["client_id_status"] = "缺少 Vertex 登录凭据"
+                continue
+            try:
+                vertex_client = EnhancedVertexClient({"vertex_config": vertex_conf})
+                detection = vertex_client.list_active_downloader_for_ip(target_ip)
+                vertex_conf["client_id"] = detection.get("client_id")
+                vertex_conf["client_id_status"] = detection.get("reason")
+                vertex_conf["client_candidates"] = detection.get("candidates", [])
+            except Exception as detect_exc:
+                logger.warning("实例 %s 的 Vertex Client ID 自动识别失败: %s", pt_item.get("id"), detect_exc)
+                vertex_conf["client_id"] = None
+                vertex_conf["client_id_status"] = "Vertex 下载器识别失败"
+
         return jsonify({
             "status": "success",
-            "message": f"主控机连接成功，获取到 {len(instances)} 台授权实例，已读取 PT 配置",
+            "message": f"主控机连接成功，获取到 {len(instances)} 台授权实例，已读取 PT 配置并尝试识别 Vertex Client ID",
             "instances": instances,
             "pt_instances": pt_instances,
         })
