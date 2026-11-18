@@ -509,6 +509,26 @@ def fetch_master_instances(config):
         raise RuntimeError("主控机 API 返回数据格式无效")
     return payload["instances"]
 
+def fetch_master_pt_configs(config):
+    """读取主控机按 API Key 授权范围提供的 PT-Seedbox 配置。"""
+    base_url = str(config.get("master_api_url") or "").strip().rstrip("/")
+    api_key = str(config.get("master_api_key") or "").strip()
+    if not base_url or not api_key:
+        raise RuntimeError("请先配置主控机 API 地址和受控机专属密钥")
+    if not base_url.startswith(("http://", "https://")):
+        base_url = "https://" + base_url
+    response = requests.get(
+        f"{base_url}/api/v1/pt-configs",
+        headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
+        timeout=20,
+    )
+    if response.status_code != 200:
+        raise RuntimeError(f"主控机 PT 配置 API 请求失败：HTTP {response.status_code}")
+    payload = response.json()
+    if not payload.get("ok") or not isinstance(payload.get("instances"), list):
+        raise RuntimeError("主控机 PT 配置 API 返回数据格式无效")
+    return payload["instances"]
+
 
 # ===================== Vertex 客户端 =====================
 class EnhancedVertexClient:
@@ -842,9 +862,16 @@ def test_master():
     payload = request.get_json(silent=True) or {}
     try:
         instances = fetch_master_instances(payload)
-        return jsonify({"status": "success", "message": f"主控机连接成功，获取到 {len(instances)} 台授权实例", "instances": instances})
+        pt_instances = fetch_master_pt_configs(payload)
+        return jsonify({
+            "status": "success",
+            "message": f"主控机连接成功，获取到 {len(instances)} 台授权实例，已读取 PT 配置",
+            "instances": instances,
+            "pt_instances": pt_instances,
+        })
     except Exception as exc:
-        return jsonify({"status": "error", "message": str(exc)}), 502
+        logger.warning("主控机 PT 配置读取失败: %s", exc)
+        return jsonify({"status": "error", "message": "主控机连接或 PT 配置读取失败，请检查 API 地址、密钥及主控机版本"}), 502
 
 
 @app.route('/api/vertex/rss-rules', methods=['POST'])
@@ -893,10 +920,12 @@ def test_qb():
     all_ok = True
     for s in test_list:
         ip, name = s['ip'], s['name']
-        base = f"http://{ip}:{qb_conf.get('port', 8080)}/api/v2"
+        server_qb = s.get("qb_config") or qb_conf
+        qb_host = server_qb.get("host") or ip
+        base = f"http://{qb_host}:{server_qb.get('port', 8080)}/api/v2"
         try:
             with requests.Session() as ses:
-                r_login = ses.post(f"{base}/auth/login", data={"username": qb_conf.get("user"), "password": qb_conf.get("password")}, timeout=5)
+                r_login = ses.post(f"{base}/auth/login", data={"username": server_qb.get("user"), "password": server_qb.get("password")}, timeout=5)
                 if r_login.status_code == 200 and r_login.text == "Ok.":
                     r_ver = ses.get(f"{base}/app/webapiVersion", timeout=5)
                     ver = r_ver.text if r_ver.status_code == 200 else "未知"
@@ -944,11 +973,13 @@ def run_monitor_task():
     QB_CONF = config.get("qb_config", {})
     vertex = EnhancedVertexClient(config)
     
-    def qb_req(ip, endpoint, data=None):
-        base = f"http://{ip}:{QB_CONF.get('port', 8080)}/api/v2"
+    def qb_req(ip, endpoint, data=None, qb_conf=None):
+        active_qb = qb_conf or QB_CONF
+        qb_host = active_qb.get("host") or ip
+        base = f"http://{qb_host}:{active_qb.get('port', 8080)}/api/v2"
         try:
             with requests.Session() as s:
-                r_log = s.post(f"{base}/auth/login", data={"username": QB_CONF.get("user"), "password": QB_CONF.get("password")}, timeout=5)
+                r_log = s.post(f"{base}/auth/login", data={"username": active_qb.get("user"), "password": active_qb.get("password")}, timeout=5)
                 if r_log.status_code != 200: return None
                 url = f"{base}{endpoint}"
                 res = s.post(url, data=data, timeout=10) if data else s.get(url, timeout=10)
@@ -957,9 +988,9 @@ def run_monitor_task():
             logger.error(f"QB 连接失败 ({ip}): {e}")
             return None
         
-    def qb_smart_action(ip, action, hashes):
+    def qb_smart_action(ip, action, hashes, qb_conf=None):
         if action == 'start': action = 'resume'
-        r = qb_req(ip, f"/torrents/{action}", data={"hashes": hashes})
+        r = qb_req(ip, f"/torrents/{action}", data={"hashes": hashes}, qb_conf=qb_conf)
         if not r or r.status_code not in [200, 204]:
             fallback = {'stop': 'pause', 'resume': 'start'}
             if action in fallback: 
@@ -980,13 +1011,14 @@ def run_monitor_task():
     # 2. 多线程并发巡检各台 VPS 的 qBittorrent 状态与流控
     def process_single_server(s):
         name, ip = s['name'], s['ip']
+        server_qb = s.get('qb_config') or QB_CONF
         is_unmanaged = s.get('unmanaged', False)
         up, dl = None, None
         traffic_valid = False
 
         # 沿用旧版实测稳定的 qB maindata 累计计数器接口。
         # 采集失败只跳过流量样本，不影响后续主控限速状态与流控处理。
-        r = qb_req(ip, "/sync/maindata?rid=0")
+        r = qb_req(ip, "/sync/maindata?rid=0", qb_conf=server_qb)
         if not r or r.status_code != 200:
             logger.warning(f"[{name}] QB maindata 请求失败，跳过本轮流量采样")
         else:
@@ -1034,7 +1066,7 @@ def run_monitor_task():
                 
         if not is_unmanaged:
             torrents = []
-            tr = qb_req(ip, "/torrents/info")
+            tr = qb_req(ip, "/torrents/info", qb_conf=server_qb)
             if tr and tr.status_code == 200: torrents = tr.json()
             
             restore_file = os.path.join(DATA_DIR, f'restore_{ip}.json')
@@ -1068,21 +1100,21 @@ def run_monitor_task():
                     except Exception as e: logger.error(f"[{name}] 保存恢复数据失败: {e}")
 
                 if hr_hashes_seeding:
-                    qb_req(ip, "/torrents/setUploadLimit", data={"hashes": "|".join(hr_hashes_seeding), "limit": HR_LIMIT_BYTES})
+                    qb_req(ip, "/torrents/setUploadLimit", data={"hashes": "|".join(hr_hashes_seeding), "limit": HR_LIMIT_BYTES}, qb_conf=server_qb)
                     action_summary.append(f"• 保种限速: 已对 {len(hr_hashes_seeding)} 个做种中的 HR 种子限速 {HR_LIMIT_KB}KB/s")
 
                 if hr_hashes_downloading:
-                    qb_smart_action(ip, "stop", "|".join(hr_hashes_downloading))
+                    qb_smart_action(ip, "stop", "|".join(hr_hashes_downloading), qb_conf=server_qb)
                     action_summary.append(f"• 暂停保护: 已暂停 {len(hr_hashes_downloading)} 个下载中的 HR 种子")
 
                 non_keep = [t['hash'] for t in torrents if t.get('category') not in KEEP_CATS and t.get('category') not in HR_CATS]
                 if non_keep:
-                    qb_req(ip, "/torrents/delete", data={"hashes": "|".join(non_keep), "deleteFiles": "true"})
+                    qb_req(ip, "/torrents/delete", data={"hashes": "|".join(non_keep), "deleteFiles": "true"}, qb_conf=server_qb)
                     action_summary.append(f"• 空间清理: 已删除 {len(non_keep)} 个普通/非保留种子")
 
                 keep_active = [t['hash'] for t in torrents if t.get('category') in KEEP_CATS and t.get('category') not in HR_CATS and t.get('state') not in ['stoppedUP', 'stoppedDL', 'pausedUP', 'pausedDL']]
                 if keep_active:
-                    qb_smart_action(ip, "stop", "|".join(keep_active))
+                    qb_smart_action(ip, "stop", "|".join(keep_active), qb_conf=server_qb)
                     action_summary.append(f"• 暂停保留: 已暂停 {len(keep_active)} 个保留分类种子")
                 
                 if not os.path.exists(restore_file):
@@ -1100,11 +1132,11 @@ def run_monitor_task():
                             if limit not in limit_groups: limit_groups[limit] = []
                             limit_groups[limit].append(t_hash)
                         for limit, hashes in limit_groups.items():
-                            qb_req(ip, "/torrents/setUploadLimit", data={"hashes": "|".join(hashes), "limit": limit})
+                            qb_req(ip, "/torrents/setUploadLimit", data={"hashes": "|".join(hashes), "limit": limit}, qb_conf=server_qb)
                         action_summary.append(f"• 恢复限速: 已恢复 {len(restore_data)} 个种子的原上传速率")
                     except Exception as e: logger.error(f"[{name}] 恢复上传限速失败: {e}")
                     
-                    qb_smart_action(ip, "resume", "all")
+                    qb_smart_action(ip, "resume", "all", qb_conf=server_qb)
                     action_summary.append("• 全局恢复: 已将全部暂停任务恢复运行")
                     try: os.remove(restore_file)
                     except Exception: pass
