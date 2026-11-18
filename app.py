@@ -679,6 +679,7 @@ class EnhancedVertexClient:
                 "client_id": None,
                 "reason": f"{match_basis}匹配到多个正常下载器，无法安全确定",
                 "candidates": matches,
+                "observed": observed,
             }
         return {
             "client_id": None,
