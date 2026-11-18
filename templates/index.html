@@ -933,6 +933,7 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
                 + '\\n成功导入 Vertex 配置：' + counts.importedVertex + ' 台'
                 + '\\n已自动识别 Client ID：' + counts.importedClientIds + ' 个'
                 + '\\n未找到完整 PT 安装记录：' + counts.unavailable + ' 台'
+                + '\\nClient ID 识别详情：' + (config.servers || []).map(server => (server.name || server.ip || '实例') + '：' + (server.vertex_client_id_status || '尚无诊断结果')).join('；')
                 + '\\n密码不会显示在此处；请点击页面顶部“保存设置”保存导入结果。';
             showToast('主控机连接成功，PT 配置已自动导入', 'success');
             renderForms();
