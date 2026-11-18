@@ -995,7 +995,7 @@ def run_monitor_task():
             fallback = {'stop': 'pause', 'resume': 'start'}
             if action in fallback: 
                 logger.warning(f"QB 动作 {action} 失败，尝试 fallback: {fallback[action]}")
-                qb_req(ip, f"/torrents/{fallback[action]}", data={"hashes": hashes})
+                qb_req(ip, f"/torrents/{fallback[action]}", data={"hashes": hashes}, qb_conf=qb_conf)
             
         # 1. 从主控机读取限速状态；连接失败时本轮失败关闭
     try:
