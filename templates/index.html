@@ -99,6 +99,9 @@
             .chart-container { height: 250px; padding: 10px; }
         }
         
+        #masterSetupOverlay { position: fixed; inset: 0; background: rgba(15,23,42,0.45); z-index: 9998; display: none; justify-content: center; align-items: center; padding: 1rem; }
+        #masterSetupOverlay.active { display: flex; }
+        .master-setup-box { background: #fff; width: 100%; max-width: 520px; padding: 2rem; border-radius: 16px; box-shadow: 0 20px 50px rgba(0,0,0,0.2); }
         #loginOverlay { position: fixed; inset: 0; background: rgba(255,255,255,0.85); backdrop-filter: blur(5px); z-index: 9999; display: flex; justify-content: center; align-items: center; opacity: 0; pointer-events: none; transition: 0.3s; }
         #loginOverlay.active { opacity: 1; pointer-events: all; }
         .login-box { background: #fff; padding: 2.5rem; border-radius: 16px; box-shadow: 0 20px 40px rgba(0,0,0,0.1); width: 100%; max-width: 380px; border: 1px solid var(--border-color); text-align: center; }
@@ -117,6 +120,22 @@
         <input type="password" id="loginPass" class="form-control text-center mb-3" placeholder="输入管理员密码" onkeypress="if(event.key==='Enter') doLogin()">
         <button class="btn btn-primary w-100 py-2" onclick="doLogin()">确认登录</button>
         <button class="btn btn-link w-100 mt-2 text-secondary text-decoration-none" onclick="document.getElementById('loginOverlay').classList.remove('active')">取消</button>
+    </div>
+</div>
+
+<div id="masterSetupOverlay">
+    <div class="master-setup-box">
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-diagram-3-fill text-primary fs-3"></i>
+            <h4 class="fw-bold mb-0">首次初始化：连接主控机</h4>
+        </div>
+        <p class="text-secondary small">先连接 VPS- 主控机。验证成功后，将自动读取每台授权 VPS 最近一次成功的 PT-Seedbox 安装记录，分别导入 QB 和 Vertex 配置。</p>
+        <label class="form-label">主控机 API 地址</label>
+        <input id="setup_master_api_url" class="form-control mb-3" placeholder="https://panel.example.com">
+        <label class="form-label">受控机专属 API Key</label>
+        <input id="setup_master_api_key" type="password" class="form-control mb-3" autocomplete="new-password" placeholder="粘贴主控机生成的密钥">
+        <div id="setupMasterStatus" class="small text-secondary mb-3">未连接。此步骤不会修改主控机或 VPS。</div>
+        <button class="btn btn-primary w-100" onclick="startMasterSetup()"><i class="bi bi-cloud-download"></i> 验证并自动初始化</button>
     </div>
 </div>
 
@@ -577,7 +596,40 @@
         else if (mode === 'wechat_app') { wx_app.classList.remove('d-none'); }
     }
 
-    function fetchConfig() { if(!isLoggedIn)return; fetch('/api/config').then(r=>r.json()).then(d => { config = d; renderForms(); if(config.master_api_url && config.master_api_key) testMasterConnection(); }); }
+    function fetchConfig() {
+        if(!isLoggedIn)return;
+        fetch('/api/config').then(r=>r.json()).then(d => {
+            config = d;
+            renderForms();
+            if (config.master_api_url && config.master_api_key) {
+                testMasterConnection();
+            } else {
+                const overlay = document.getElementById('masterSetupOverlay');
+                if (overlay) {
+                    document.getElementById('setup_master_api_url').value = config.master_api_url || '';
+                    overlay.classList.add('active');
+                }
+            }
+        });
+    }
+
+    async function startMasterSetup() {
+        const url = document.getElementById('setup_master_api_url').value.trim();
+        const key = document.getElementById('setup_master_api_key').value.trim();
+        const status = document.getElementById('setupMasterStatus');
+        if (!url || !key) { status.innerText = '请填写主控机 API 地址和专属密钥'; return; }
+        document.getElementById('master_api_url').value = url;
+        document.getElementById('master_api_key').value = key;
+        status.innerText = '正在验证主控机并导入 PT 配置...';
+        const ok = await testMasterConnection();
+        if (ok) {
+            saveConfig();
+            document.getElementById('masterSetupOverlay').classList.remove('active');
+            showToast('首次初始化完成，请检查实例配置并保存确认', 'success');
+        } else {
+            status.innerText = '连接失败，请检查 API 地址、密钥及主控机版本';
+        }
+    }
     let vertexRssRules = [];
     let rssRulesCollapsed = false;
 
@@ -848,9 +900,11 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
                 + '\\n密码不会显示在此处；请点击页面顶部“保存设置”保存导入结果。';
             showToast('主控机连接成功，PT 配置已自动导入', 'success');
             renderForms();
+            return true;
         } catch (err) {
             resultBox.innerText = '连接失败：' + err.message;
             showToast('主控机连接失败', 'error');
+            return false;
         }
     }
 
