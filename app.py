@@ -619,25 +619,40 @@ class EnhancedVertexClient:
         for item in downloaders:
             if not isinstance(item, dict):
                 continue
-            if item.get("enable") is not True or item.get("status") is not True:
+            def vertex_flag(value):
+                if value is True:
+                    return True
+                if isinstance(value, (int, float)):
+                    return value == 1
+                return str(value or "").strip().lower() in {"true", "1", "yes", "enabled", "online", "正常", "已启用"}
+
+            if not vertex_flag(item.get("enable")) or not vertex_flag(item.get("status")):
                 continue
             active_count += 1
             raw_url = str(item.get("clientUrl") or "").strip()
             try:
                 parsed = urlparse(raw_url if "://" in raw_url else "http://" + raw_url)
                 host = (parsed.hostname or "").strip("[]").lower()
-                port = parsed.port
+                url_port = parsed.port
             except (TypeError, ValueError):
-                host, port = "", None
+                host, url_port = "", None
+            # Vertex 的列表对象通常同时提供 clientUrl 和 port；两者均检查，
+            # 兼容 clientUrl 缺端口/格式异常但 port 字段完整的版本。
+            try:
+                item_port = int(str(item.get("port") or "").strip())
+            except (TypeError, ValueError):
+                item_port = None
+            ports = {p for p in (url_port, item_port) if p is not None}
 
-            # PT-Seedbox 在 Vertex 容器内使用 172.17.0.1:<QB端口> 访问宿主机，
-            # 因此 clientUrl 的 hostname 不等于 VPS 公网 IP，端口才是稳定匹配依据。
-            matched = port == target_port if target_port is not None else bool(host and host == target_ip)
+            # PT-Seedbox 在 Vertex 容器内通过 172.17.0.1:<QB端口> 访问宿主机；
+            # Docker 网关 hostname 不等于 VPS 公网 IP，因此端口是首选匹配依据。
+            matched = (target_port in ports) if target_port is not None else bool(host and host == target_ip)
             if matched and item.get("id") not in (None, ""):
                 matches.append({
                     "id": str(item["id"]),
                     "alias": str(item.get("alias") or ""),
                     "client_url": raw_url,
+                    "port": next(iter(ports), None),
                 })
 
         match_basis = f"QB WebUI 端口 {target_port}" if target_port is not None else f"IP {target_ip}"
