@@ -425,7 +425,7 @@
                     <label class="form-label">受控机专属 API 密钥</label>
                     <input id="master_api_key" type="password" class="form-control" autocomplete="new-password" placeholder="粘贴主控机生成的一次性密钥">
                 </div>
-                <div class="small text-secondary mb-3">输入主控机 API 地址和受控机专属密钥后，点击上方按钮。系统将读取授权实例及每台服务器最近一次成功的 PT-Seedbox 安装输出，自动导入各自的 QB 端口/账号密码和 Vertex 地址/账号密码，并按 IP 绑定实例。未找到可靠安装记录的服务器不会覆盖现有配置。</div>
+                <div class="small text-secondary mb-3">每台 VPS 的 netcup-monitor-2 使用对应的主控机专属 API Key。连接后自动读取本机对应的 QB、Vertex 安装配置，并登录 Vertex 获取已启用且状态正常的下载器列表，按 QB IP 精确匹配 Client ID。未能唯一匹配时不会猜测或覆盖已有 Client ID。</div>
                 <div id="masterApiResult" class="alert alert-secondary small mb-0">尚未测试连接</div>
             </div>
         </div>
@@ -863,11 +863,17 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
             }
             if (pt.vertex && pt.vertex.api_url && pt.vertex.api_user && pt.vertex.api_password) {
                 server.vertex_config = {
+                    ...(server.vertex_config || {}),
                     api_url: pt.vertex.api_url,
                     api_user: pt.vertex.api_user,
                     api_password: pt.vertex.api_password,
-                    container_name: pt.vertex.container_name || 'vertex'
+                    container_name: pt.vertex.container_name || 'vertex',
+                    client_id: pt.vertex.client_id || (server.vertex_config || {}).client_id || ''
                 };
+                if (pt.vertex.client_id) {
+                    server.client_id = String(pt.vertex.client_id);
+                }
+                server.vertex_client_id_status = pt.vertex.client_id_status || (pt.vertex.client_id ? '已自动识别' : '未能唯一匹配');
                 if (!firstVertex) firstVertex = server.vertex_config;
                 importedVertex++;
             }
@@ -876,7 +882,8 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
         });
         if (firstQb) config.qb_config = {...(config.qb_config || {}), ...firstQb};
         if (firstVertex) config.vertex_config = {...(config.vertex_config || {}), ...firstVertex};
-        return {importedQb, importedVertex, unavailable};
+        const importedClientIds = (config.servers || []).filter(s => String(s.client_id || '').trim()).length;
+        return {importedQb, importedVertex, unavailable, importedClientIds};
     }
 
     async function testMasterConnection() {
@@ -896,6 +903,7 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
                 + '\\n授权实例：' + masterInstances.length
                 + '\\n成功导入 QB 配置：' + counts.importedQb + ' 台'
                 + '\\n成功导入 Vertex 配置：' + counts.importedVertex + ' 台'
+                + '\\n已自动识别 Client ID：' + counts.importedClientIds + ' 个'
                 + '\\n未找到完整 PT 安装记录：' + counts.unavailable + ' 台'
                 + '\\n密码不会显示在此处；请点击页面顶部“保存设置”保存导入结果。';
             showToast('主控机连接成功，PT 配置已自动导入', 'success');
