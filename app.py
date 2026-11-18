@@ -517,6 +517,8 @@ def fetch_master_pt_configs(config):
         raise RuntimeError("请先配置主控机 API 地址和受控机专属密钥")
     if not base_url.startswith(("http://", "https://")):
         base_url = "https://" + base_url
+    if not base_url.startswith("https://"):
+        raise RuntimeError("为保护每台 VPS 的 PT 密码，主控机 PT 配置接口必须使用 HTTPS")
     response = requests.get(
         f"{base_url}/api/v1/pt-configs",
         headers={"Authorization": f"Bearer {api_key}", "Accept": "application/json"},
