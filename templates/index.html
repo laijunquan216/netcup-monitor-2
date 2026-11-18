@@ -835,7 +835,7 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
     
     function importMasterPtConfigs(ptInstances) {
         const byId = new Map((ptInstances || []).map(x => [String(x.id), x]));
-        let importedQb = 0, importedVertex = 0, unavailable = 0;
+        let importedQb = 0, importedVertex = 0, unavailable = 0, importedClientIds = 0;
         let firstQb = null, firstVertex = null;
         (masterInstances || []).forEach(master => {
             let server = (config.servers || []).find(s =>
@@ -872,6 +872,7 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
                 };
                 if (pt.vertex.client_id) {
                     server.client_id = String(pt.vertex.client_id);
+                    importedClientIds++;
                 }
                 server.vertex_client_id_status = pt.vertex.client_id_status || (pt.vertex.client_id ? '已自动识别' : '未能唯一匹配');
                 if (!firstVertex) firstVertex = server.vertex_config;
@@ -882,7 +883,6 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
         });
         if (firstQb) config.qb_config = {...(config.qb_config || {}), ...firstQb};
         if (firstVertex) config.vertex_config = {...(config.vertex_config || {}), ...firstVertex};
-        const importedClientIds = (config.servers || []).filter(s => String(s.client_id || '').trim()).length;
         return {importedQb, importedVertex, unavailable, importedClientIds};
     }
 
