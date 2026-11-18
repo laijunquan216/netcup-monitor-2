@@ -615,42 +615,54 @@ class EnhancedVertexClient:
             return {"client_id": None, "reason": "Vertex 登录失败或下载器列表接口不可用", "candidates": []}
 
         matches = []
+        diagnostics = []
         active_count = 0
+
+        def vertex_flag(value):
+            if value is True:
+                return True
+            if isinstance(value, (int, float)):
+                return value == 1
+            return str(value or "").strip().lower() in {"true", "1", "yes", "enabled", "online", "正常", "已启用"}
+
         for item in downloaders:
             if not isinstance(item, dict):
                 continue
-            def vertex_flag(value):
-                if value is True:
-                    return True
-                if isinstance(value, (int, float)):
-                    return value == 1
-                return str(value or "").strip().lower() in {"true", "1", "yes", "enabled", "online", "正常", "已启用"}
+            enabled = vertex_flag(item.get("enable"))
+            healthy = vertex_flag(item.get("status"))
+            if enabled and healthy:
+                active_count += 1
 
-            if not vertex_flag(item.get("enable")) or not vertex_flag(item.get("status")):
-                continue
-            active_count += 1
-            raw_url = str(item.get("clientUrl") or "").strip()
+            raw_url = str(item.get("clientUrl") or item.get("client_url") or "").strip()
             try:
                 parsed = urlparse(raw_url if "://" in raw_url else "http://" + raw_url)
                 host = (parsed.hostname or "").strip("[]").lower()
                 url_port = parsed.port
             except (TypeError, ValueError):
                 host, url_port = "", None
-            # Vertex 的列表对象通常同时提供 clientUrl 和 port；两者均检查，
-            # 兼容 clientUrl 缺端口/格式异常但 port 字段完整的版本。
             try:
                 item_port = int(str(item.get("port") or "").strip())
             except (TypeError, ValueError):
                 item_port = None
             ports = {p for p in (url_port, item_port) if p is not None}
 
-            # PT-Seedbox 在 Vertex 容器内通过 172.17.0.1:<QB端口> 访问宿主机；
-            # Docker 网关 hostname 不等于 VPS 公网 IP，因此端口是首选匹配依据。
+            # 诊断只保留识别所需字段，不记录账号、密码、SID 或完整 API 响应。
+            diagnostics.append({
+                "id": str(item.get("id") or ""),
+                "alias": str(item.get("alias") or item.get("name") or ""),
+                "client_url": raw_url,
+                "url_host": host,
+                "url_port": url_port,
+                "object_port": item_port,
+                "enable": item.get("enable"),
+                "status": item.get("status"),
+            })
+
             matched = (target_port in ports) if target_port is not None else bool(host and host == target_ip)
-            if matched and item.get("id") not in (None, ""):
+            if matched and enabled and healthy and item.get("id") not in (None, ""):
                 matches.append({
                     "id": str(item["id"]),
-                    "alias": str(item.get("alias") or ""),
+                    "alias": str(item.get("alias") or item.get("name") or ""),
                     "client_url": raw_url,
                     "port": next(iter(ports), None),
                 })
@@ -661,17 +673,20 @@ class EnhancedVertexClient:
                 "client_id": matches[0]["id"],
                 "reason": f"{match_basis}唯一匹配，且下载器已启用、状态正常",
                 "candidates": matches,
+                "diagnostics": diagnostics,
             }
         if len(matches) > 1:
             return {
                 "client_id": None,
                 "reason": f"{match_basis}匹配到多个正常下载器，无法安全确定",
                 "candidates": matches,
+                "diagnostics": diagnostics,
             }
         return {
             "client_id": None,
-            "reason": f"未找到{match_basis}匹配的正常下载器（当前正常启用 {active_count} 个）",
+            "reason": f"未找到{match_basis}匹配的正常下载器（Vertex 返回 {len(diagnostics)} 项，正常启用 {active_count} 项）",
             "candidates": [],
+            "diagnostics": diagnostics,
         }
 
     def list_rss_rules(self):
