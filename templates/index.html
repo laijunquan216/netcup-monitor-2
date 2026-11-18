@@ -902,6 +902,7 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
                     importedClientIds++;
                 }
                 server.vertex_client_id_status = pt.vertex.client_id_status || (pt.vertex.client_id ? '已自动识别' : '未能唯一匹配');
+                server.vertex_client_id_diagnostics = Array.isArray(pt.vertex.client_id_diagnostics) ? pt.vertex.client_id_diagnostics : [];
                 if (!firstVertex) firstVertex = server.vertex_config;
                 importedVertex++;
             }
