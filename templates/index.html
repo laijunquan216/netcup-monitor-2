@@ -637,7 +637,8 @@
         }
     }
     let vertexRssRules = [];
-    // 默认以摘要模式展示；点击“修改选择”才展开完整 RSS 列表。\n    let rssRulesCollapsed = true;
+    // 默认以摘要模式展示；点击“修改选择”才展开完整 RSS 列表。
+    let rssRulesCollapsed = true;
 
     function escapeHtml(value) {
         return String(value ?? '').replace(/[&<>"']/g, ch => ({
