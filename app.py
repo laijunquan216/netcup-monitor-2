@@ -592,11 +592,18 @@ class EnhancedVertexClient:
             logger.warning("读取 Vertex 下载器列表失败: %s", exc)
             return None
 
-    def list_active_downloader_for_ip(self, target_ip):
-        """只选择已启用、连接正常且 clientUrl 主机 IP 与本机 QB IP 一致的下载器。"""
+    def list_active_downloader_for_ip(self, target_ip, target_port=None):
+        """优先按 QB WebUI 端口匹配；缺少端口时才回退到 clientUrl 主机 IP。"""
         target_ip = str(target_ip or "").strip().strip("[]").lower()
-        if not target_ip or not self.base_url:
-            return {"client_id": None, "reason": "缺少 Vertex 地址或 QB IP", "candidates": []}
+        try:
+            target_port = int(str(target_port).strip()) if target_port not in (None, "") else None
+            if target_port is not None and not (1 <= target_port <= 65535):
+                target_port = None
+        except (TypeError, ValueError):
+            target_port = None
+
+        if (target_port is None and not target_ip) or not self.base_url:
+            return {"client_id": None, "reason": "缺少 Vertex 地址以及可用于匹配的 QB 端口/IP", "candidates": []}
 
         sid = self.conf.get("connect_sid")
         downloaders = self._do_list_downloaders(sid) if sid else None
@@ -619,22 +626,36 @@ class EnhancedVertexClient:
             try:
                 parsed = urlparse(raw_url if "://" in raw_url else "http://" + raw_url)
                 host = (parsed.hostname or "").strip("[]").lower()
-            except Exception:
-                host = ""
-            if host and host == target_ip and item.get("id") not in (None, ""):
+                port = parsed.port
+            except (TypeError, ValueError):
+                host, port = "", None
+
+            # PT-Seedbox 在 Vertex 容器内使用 172.17.0.1:<QB端口> 访问宿主机，
+            # 因此 clientUrl 的 hostname 不等于 VPS 公网 IP，端口才是稳定匹配依据。
+            matched = port == target_port if target_port is not None else bool(host and host == target_ip)
+            if matched and item.get("id") not in (None, ""):
                 matches.append({
                     "id": str(item["id"]),
                     "alias": str(item.get("alias") or ""),
                     "client_url": raw_url,
                 })
 
+        match_basis = f"QB WebUI 端口 {target_port}" if target_port is not None else f"IP {target_ip}"
         if len(matches) == 1:
-            return {"client_id": matches[0]["id"], "reason": "IP 匹配且下载器已启用、状态正常", "candidates": matches}
+            return {
+                "client_id": matches[0]["id"],
+                "reason": f"{match_basis}唯一匹配，且下载器已启用、状态正常",
+                "candidates": matches,
+            }
         if len(matches) > 1:
-            return {"client_id": None, "reason": "同一 IP 匹配到多个正常下载器，无法安全确定", "candidates": matches}
+            return {
+                "client_id": None,
+                "reason": f"{match_basis}匹配到多个正常下载器，无法安全确定",
+                "candidates": matches,
+            }
         return {
             "client_id": None,
-            "reason": f"未找到 IP 匹配的正常下载器（当前正常启用 {active_count} 个）",
+            "reason": f"未找到{match_basis}匹配的正常下载器（当前正常启用 {active_count} 个）",
             "candidates": [],
         }
 
@@ -944,13 +965,14 @@ def test_master():
             vertex_conf = pt["vertex"]
             qb_conf = pt.get("qb") or {}
             target_ip = qb_conf.get("host") or pt_item.get("ip") or master_by_id.get(str(pt_item.get("id")), {}).get("ip")
+            target_port = qb_conf.get("port")
             if not vertex_conf.get("api_url") or not vertex_conf.get("api_user") or not vertex_conf.get("api_password"):
                 vertex_conf["client_id"] = None
                 vertex_conf["client_id_status"] = "缺少 Vertex 登录凭据"
                 continue
             try:
                 vertex_client = EnhancedVertexClient({"vertex_config": vertex_conf})
-                detection = vertex_client.list_active_downloader_for_ip(target_ip)
+                detection = vertex_client.list_active_downloader_for_ip(target_ip, target_port)
                 vertex_conf["client_id"] = detection.get("client_id")
                 vertex_conf["client_id_status"] = detection.get("reason")
                 vertex_conf["client_candidates"] = detection.get("candidates", [])
