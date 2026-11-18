@@ -99,6 +99,9 @@
             .chart-container { height: 250px; padding: 10px; }
         }
         
+        #masterSetupOverlay { position: fixed; inset: 0; background: rgba(15,23,42,0.45); z-index: 9998; display: none; justify-content: center; align-items: center; padding: 1rem; }
+        #masterSetupOverlay.active { display: flex; }
+        .master-setup-box { background: #fff; width: 100%; max-width: 520px; padding: 2rem; border-radius: 16px; box-shadow: 0 20px 50px rgba(0,0,0,0.2); }
         #loginOverlay { position: fixed; inset: 0; background: rgba(255,255,255,0.85); backdrop-filter: blur(5px); z-index: 9999; display: flex; justify-content: center; align-items: center; opacity: 0; pointer-events: none; transition: 0.3s; }
         #loginOverlay.active { opacity: 1; pointer-events: all; }
         .login-box { background: #fff; padding: 2.5rem; border-radius: 16px; box-shadow: 0 20px 40px rgba(0,0,0,0.1); width: 100%; max-width: 380px; border: 1px solid var(--border-color); text-align: center; }
@@ -117,6 +120,22 @@
         <input type="password" id="loginPass" class="form-control text-center mb-3" placeholder="输入管理员密码" onkeypress="if(event.key==='Enter') doLogin()">
         <button class="btn btn-primary w-100 py-2" onclick="doLogin()">确认登录</button>
         <button class="btn btn-link w-100 mt-2 text-secondary text-decoration-none" onclick="document.getElementById('loginOverlay').classList.remove('active')">取消</button>
+    </div>
+</div>
+
+<div id="masterSetupOverlay">
+    <div class="master-setup-box">
+        <div class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-diagram-3-fill text-primary fs-3"></i>
+            <h4 class="fw-bold mb-0">首次初始化：连接主控机</h4>
+        </div>
+        <p class="text-secondary small">先连接 VPS- 主控机。验证成功后，将自动读取每台授权 VPS 最近一次成功的 PT-Seedbox 安装记录，分别导入 QB 和 Vertex 配置。</p>
+        <label class="form-label">主控机 API 地址</label>
+        <input id="setup_master_api_url" class="form-control mb-3" placeholder="https://panel.example.com">
+        <label class="form-label">受控机专属 API Key</label>
+        <input id="setup_master_api_key" type="password" class="form-control mb-3" autocomplete="new-password" placeholder="粘贴主控机生成的密钥">
+        <div id="setupMasterStatus" class="small text-secondary mb-3">未连接。此步骤不会修改主控机或 VPS。</div>
+        <button class="btn btn-primary w-100" onclick="startMasterSetup()"><i class="bi bi-cloud-download"></i> 验证并自动初始化</button>
     </div>
 </div>
 
@@ -396,7 +415,7 @@
             <div class="white-card">
                 <div class="card-header-custom">
                     <div class="card-title">主控机 VPS- 限速状态接口</div>
-                    <button class="btn btn-sm btn-outline-primary" onclick="testMasterConnection()"><i class="bi bi-plug"></i> 测试连接并获取实例</button>
+                    <button class="btn btn-sm btn-outline-primary" onclick="testMasterConnection()"><i class="bi bi-plug"></i> 连接并自动导入 PT 配置</button>
                 </div>
                 <div class="mb-3">
                     <label class="form-label">主控机 API 地址</label>
@@ -406,7 +425,7 @@
                     <label class="form-label">受控机专属 API 密钥</label>
                     <input id="master_api_key" type="password" class="form-control" autocomplete="new-password" placeholder="粘贴主控机生成的一次性密钥">
                 </div>
-                <div class="small text-secondary mb-3">保存后点击测试连接。主控机只返回此密钥获准访问的实例。请在“实例配置”中为每台本地服务器选择对应的主控机实例。</div>
+                <div class="small text-secondary mb-3">每台 VPS 的 netcup-monitor-2 使用对应的主控机专属 API Key。连接后自动读取本机对应的 QB、Vertex 安装配置，并登录 Vertex 获取已启用且状态正常的下载器列表，按 QB IP 精确匹配 Client ID。未能唯一匹配时不会猜测或覆盖已有 Client ID。</div>
                 <div id="masterApiResult" class="alert alert-secondary small mb-0">尚未测试连接</div>
             </div>
         </div>
@@ -577,7 +596,40 @@
         else if (mode === 'wechat_app') { wx_app.classList.remove('d-none'); }
     }
 
-    function fetchConfig() { if(!isLoggedIn)return; fetch('/api/config').then(r=>r.json()).then(d => { config = d; renderForms(); if(config.master_api_url && config.master_api_key) testMasterConnection(); }); }
+    function fetchConfig() {
+        if(!isLoggedIn)return;
+        fetch('/api/config').then(r=>r.json()).then(d => {
+            config = d;
+            renderForms();
+            if (config.master_api_url && config.master_api_key) {
+                testMasterConnection();
+            } else {
+                const overlay = document.getElementById('masterSetupOverlay');
+                if (overlay) {
+                    document.getElementById('setup_master_api_url').value = config.master_api_url || '';
+                    overlay.classList.add('active');
+                }
+            }
+        });
+    }
+
+    async function startMasterSetup() {
+        const url = document.getElementById('setup_master_api_url').value.trim();
+        const key = document.getElementById('setup_master_api_key').value.trim();
+        const status = document.getElementById('setupMasterStatus');
+        if (!url || !key) { status.innerText = '请填写主控机 API 地址和专属密钥'; return; }
+        document.getElementById('master_api_url').value = url;
+        document.getElementById('master_api_key').value = key;
+        status.innerText = '正在验证主控机并导入 PT 配置...';
+        const ok = await testMasterConnection();
+        if (ok) {
+            saveConfig();
+            document.getElementById('masterSetupOverlay').classList.remove('active');
+            showToast('首次初始化完成，请检查实例配置并保存确认', 'success');
+        } else {
+            status.innerText = '连接失败，请检查 API 地址、密钥及主控机版本';
+        }
+    }
     let vertexRssRules = [];
     let rssRulesCollapsed = false;
 
@@ -728,7 +780,7 @@
         const sc = document.getElementById('serverContainer'); sc.innerHTML='';
         (config.servers||[]).forEach((s,i) => {
             sc.innerHTML += `<div class="config-row">
-                <div class="cfg-name"><input class="form-control form-control-sm" placeholder="名称" value="${s.name}" onchange="updateArr('servers',${i},'name',this.value)"></div>
+                <div class="cfg-name"><input class="form-control form-control-sm" placeholder="名称" value="${s.name}" onchange="updateArr('servers',${i},'name',this.value)"><div class="form-hint">${s.qb_config ? 'QB 已独立配置' : '使用全局 QB 配置'} · ${s.vertex_config ? 'Vertex 已获取' : '无独立 Vertex 配置'}</div></div>
                 <div class="cfg-ip"><input class="form-control form-control-sm font-mono" placeholder="IP" value="${s.ip}" onchange="updateArr('servers',${i},'ip',this.value)"></div>
                 <div class="cfg-id">
                     <input class="form-control form-control-sm font-mono mb-1" placeholder="Client ID" value="${s.client_id||''}" onchange="updateArr('servers',${i},'client_id',this.value)">
@@ -757,7 +809,7 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
         config.master_api_url=document.getElementById('master_api_url').value.trim();
         config.master_api_key=document.getElementById('master_api_key').value.trim();
         delete config.scp_config; delete config.soap_config;
-        config.qb_config={user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value) || 8080};
+        config.qb_config={...(config.qb_config||{}),user:document.getElementById('qb_user').value,password:document.getElementById('qb_pass').value,port:parseInt(document.getElementById('qb_port').value) || 8080};
         config.vertex_config={...(config.vertex_config||{}),api_url:document.getElementById('vt_url').value,api_user:document.getElementById('vt_user').value,api_password:document.getElementById('vt_pass').value,container_name:document.getElementById('vt_container').value};
         delete config.rss_dir; 
         
@@ -781,25 +833,86 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
     
     function triggerRun() { fetch('/api/run_now', {method:'POST'}).then(()=>showToast('已触发后台巡检')); }
     
+    function importMasterPtConfigs(ptInstances) {
+        const byId = new Map((ptInstances || []).map(x => [String(x.id), x]));
+        let importedQb = 0, importedVertex = 0, unavailable = 0, importedClientIds = 0;
+        let firstQb = null, firstVertex = null;
+        (masterInstances || []).forEach(master => {
+            let server = (config.servers || []).find(s =>
+                String(s.master_server_id || '') === String(master.id)
+                || (String(s.ip || '').trim() && String(s.ip || '').trim() === String(master.ip || '').trim())
+            );
+            if (!server) {
+                if (!config.servers) config.servers = [];
+                server = {name: master.name || '', ip: master.ip || '', client_id: '', master_server_id: '', unmanaged: false};
+                config.servers.push(server);
+            }
+            applyMasterInstance(server, master);
+            const item = byId.get(String(master.id));
+            const pt = item && item.pt_config;
+            if (!pt) { unavailable++; return; }
+            if (pt.qb && pt.qb.credentials_available && pt.qb.port) {
+                server.qb_config = {
+                    host: pt.qb.host || master.ip,
+                    port: Number(pt.qb.port),
+                    user: pt.qb.user,
+                    password: pt.qb.password
+                };
+                if (!firstQb) firstQb = server.qb_config;
+                importedQb++;
+            }
+            if (pt.vertex && pt.vertex.api_url && pt.vertex.api_user && pt.vertex.api_password) {
+                server.vertex_config = {
+                    ...(server.vertex_config || {}),
+                    api_url: pt.vertex.api_url,
+                    api_user: pt.vertex.api_user,
+                    api_password: pt.vertex.api_password,
+                    container_name: pt.vertex.container_name || 'vertex',
+                    client_id: pt.vertex.client_id || (server.vertex_config || {}).client_id || ''
+                };
+                if (pt.vertex.client_id) {
+                    server.client_id = String(pt.vertex.client_id);
+                    importedClientIds++;
+                }
+                server.vertex_client_id_status = pt.vertex.client_id_status || (pt.vertex.client_id ? '已自动识别' : '未能唯一匹配');
+                if (!firstVertex) firstVertex = server.vertex_config;
+                importedVertex++;
+            }
+            server.pt_config_source = pt.source || 'pt-seedbox-install-log';
+            server.pt_config_updated_at = pt.log_created_at || '';
+        });
+        if (firstQb) config.qb_config = {...(config.qb_config || {}), ...firstQb};
+        if (firstVertex) config.vertex_config = {...(config.vertex_config || {}), ...firstVertex};
+        return {importedQb, importedVertex, unavailable, importedClientIds};
+    }
+
     async function testMasterConnection() {
         if(!isLoggedIn) return;
         const payload = {...config, master_api_url: document.getElementById('master_api_url').value.trim(), master_api_key: document.getElementById('master_api_key').value.trim()};
         const resultBox = document.getElementById('masterApiResult');
-        resultBox.innerText = '正在连接主控机...';
+        resultBox.innerText = '正在连接主控机并读取各服务器 PT 安装记录...';
         try {
             const r = await fetch('/api/test_master', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
             const data = await r.json();
             if (!r.ok || data.status !== 'success') throw new Error(data.message || '连接失败');
             masterInstances = data.instances || [];
-            (config.servers||[]).forEach(s => { if (s.master_server_id) { const m=masterInstances.find(x=>String(x.id)===String(s.master_server_id)); if(m) applyMasterInstance(s,m); } });
-            config.master_api_url = payload.master_api_url; config.master_api_key = payload.master_api_key;
-            resultBox.innerText = data.message + '\\n' + masterInstances.map(x => x.id + ' | ' + x.name + ' | ' + x.ip + ' | ' + (x.throttled ? '限速' : '正常')).join('\\n');
-            showToast('主控机连接成功', 'success');
+            config.master_api_url = payload.master_api_url;
+            config.master_api_key = payload.master_api_key;
+            const counts = importMasterPtConfigs(data.pt_instances || []);
+            resultBox.innerText = data.message
+                + '\\n授权实例：' + masterInstances.length
+                + '\\n成功导入 QB 配置：' + counts.importedQb + ' 台'
+                + '\\n成功导入 Vertex 配置：' + counts.importedVertex + ' 台'
+                + '\\n已自动识别 Client ID：' + counts.importedClientIds + ' 个'
+                + '\\n未找到完整 PT 安装记录：' + counts.unavailable + ' 台'
+                + '\\n密码不会显示在此处；请点击页面顶部“保存设置”保存导入结果。';
+            showToast('主控机连接成功，PT 配置已自动导入', 'success');
             renderForms();
+            return true;
         } catch (err) {
-            masterInstances = [];
             resultBox.innerText = '连接失败：' + err.message;
             showToast('主控机连接失败', 'error');
+            return false;
         }
     }
 
