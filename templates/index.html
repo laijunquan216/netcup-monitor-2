@@ -425,7 +425,7 @@
                     <label class="form-label">受控机专属 API 密钥</label>
                     <input id="master_api_key" type="password" class="form-control" autocomplete="new-password" placeholder="粘贴主控机生成的一次性密钥">
                 </div>
-                <div class="small text-secondary mb-3">每台 VPS 的 netcup-monitor-2 使用对应的主控机专属 API Key。连接后自动读取本机对应的 QB、Vertex 安装配置，并登录 Vertex 获取已启用且状态正常的下载器列表，按 QB IP 精确匹配 Client ID。未能唯一匹配时不会猜测或覆盖已有 Client ID。</div>
+                <div class="small text-secondary mb-3">每台 VPS 的 netcup-monitor-2 使用对应的主控机专属 API Key。手动连接后读取本机对应的 QB、Vertex 安装配置；Client ID 优先按 QB WebUI 端口匹配 Vertex 下载器（兼容 Docker 网关地址），缺少 QB 端口时才按 IP 匹配。页面刷新不会重复导入；未能唯一匹配时不会猜测或覆盖已有 Client ID。</div>
                 <div id="masterApiResult" class="alert alert-secondary small mb-0">尚未测试连接</div>
             </div>
         </div>
@@ -602,7 +602,9 @@
             config = d;
             renderForms();
             if (config.master_api_url && config.master_api_key) {
-                testMasterConnection();
+                // 页面刷新只恢复本地配置，不重复请求主控机或覆盖用户手动修改的实例配置。
+                const resultBox = document.getElementById('masterApiResult');
+                if (resultBox) resultBox.innerText = '主控机连接信息已保存。页面刷新不会自动重新导入；需要同步时请手动点击“连接并自动导入 PT 配置”。';
             } else {
                 const overlay = document.getElementById('masterSetupOverlay');
                 if (overlay) {
@@ -610,7 +612,11 @@
                     overlay.classList.add('active');
                 }
             }
-        });
+            // RSS 任务列表只用于把已保存的 ID 显示为任务名称，不触发主控机 PT 配置导入。
+            if (config.vertex_config?.api_url && config.vertex_config?.api_user) {
+                loadVertexRssRules();
+            }
+        }).catch(error => showToast('读取配置失败：' + error.message, 'error'));
     }
 
     async function startMasterSetup() {
@@ -713,8 +719,14 @@
         if (!vertexRssRules.length) {
             if (saveBtn) saveBtn.classList.add('d-none');
             if (editBtn) editBtn.classList.add('d-none');
-            if (!box.dataset.loaded) box.innerHTML = '<div class="text-secondary small">尚未读取 RSS 任务列表</div>';
-            else box.innerHTML = '<div class="text-secondary small">没有可显示的 RSS 任务</div>';
+            const savedIds = (config.rss_ids || []).map(String);
+            if (savedIds.length) {
+                box.innerHTML = '<div class="text-secondary small">已保存 ' + savedIds.length + ' 个 RSS 任务 ID：' + savedIds.map(escapeHtml).join(', ') + '。读取 Vertex 任务列表后可显示名称。</div>';
+            } else if (!box.dataset.loaded) {
+                box.innerHTML = '<div class="text-secondary small">尚未读取 RSS 任务列表</div>';
+            } else {
+                box.innerHTML = '<div class="text-secondary small">没有可显示的 RSS 任务</div>';
+            }
             return;
         }
         const selected = new Set((config.rss_ids || []).map(String));
@@ -745,11 +757,16 @@
         if (editBtn) editBtn.classList.add('d-none');
     }
 
-    function saveRssRuleSelection() {
+    async function saveRssRuleSelection() {
         rssRulesCollapsed = true;
         renderRssRules();
         const count = (config.rss_ids || []).length;
-        showToast(`已保存选择：${count} 个 RSS 任务。请再点击页面顶部“保存设置”写入配置`, 'success');
+        const result = await saveConfig(true);
+        if (result && result.status === 'success') {
+            showToast(`RSS 任务选择已保存：${count} 个`, 'success');
+        } else {
+            showToast('RSS 任务选择保存失败，请检查日志后重试', 'error');
+        }
     }
 
     function editRssRuleSelection() {
@@ -802,8 +819,8 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
     function addServerRow(){if(!config.servers)config.servers=[];config.servers.push({name:'New',ip:'',client_id:'',master_server_id:'',unmanaged:false});renderForms();}
 
     
-    function saveConfig() {
-        if(!isLoggedIn)return; 
+    function saveConfig(silent=false) {
+        if(!isLoggedIn)return Promise.resolve(null); 
         const cleanSplit = (str) => str.replace(/，/g, ',').split(',').map(s=>s.trim()).filter(x=>x);
 
         config.master_api_url=document.getElementById('master_api_url').value.trim();
@@ -828,7 +845,16 @@ ${masterInstances.map(x => '<option value="'+escapeHtml(x.id)+'" '+(String(s.mas
 
         (config.servers||[]).forEach(s => { if (s.master_server_id) { const m=masterInstances.find(x=>String(x.id)===String(s.master_server_id)); if(m) applyMasterInstance(s,m); } });
         const np=document.getElementById('admin_pass').value; if(np)config.admin_password=np;
-        fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)}).then(r=>r.json()).then(res=>showToast(res.status==='success'?'配置已保存':'保存失败',res.status==='success'?'success':'error'));
+        return fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)})
+            .then(r=>r.json())
+            .then(res => {
+                if (!silent) showToast(res.status==='success'?'配置已保存':'保存失败',res.status==='success'?'success':'error');
+                return res;
+            })
+            .catch(error => {
+                if (!silent) showToast('保存失败：' + error.message, 'error');
+                return {status: 'error'};
+            });
     }
     
     function triggerRun() { fetch('/api/run_now', {method:'POST'}).then(()=>showToast('已触发后台巡检')); }
