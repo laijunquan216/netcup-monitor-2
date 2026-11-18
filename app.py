@@ -1006,6 +1006,7 @@ def test_master():
                 vertex_conf["client_id"] = detection.get("client_id")
                 vertex_conf["client_id_status"] = detection.get("reason")
                 vertex_conf["client_candidates"] = detection.get("candidates", [])
+                vertex_conf["client_id_diagnostics"] = detection.get("diagnostics", [])
             except Exception as detect_exc:
                 logger.warning("实例 %s 的 Vertex Client ID 自动识别失败: %s", pt_item.get("id"), detect_exc)
                 vertex_conf["client_id"] = None
